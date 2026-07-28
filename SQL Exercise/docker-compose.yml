@@ -1,0 +1,13 @@
+services:
+  db:
+    image: postgres:16
+    container_name: qvc_sql_exercise
+    environment:
+      POSTGRES_DB: qvc_sql_exercise
+      POSTGRES_USER: qvc
+      POSTGRES_PASSWORD: qvc
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./setup:/setup
+      - ./setup/init.sql:/docker-entrypoint-initdb.d/init.sql
