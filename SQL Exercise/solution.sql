@@ -2,8 +2,8 @@
 -- Dialect: PostgreSQL 16
 -- Schema/seed: see setup/init.sql (run via `docker compose up` in this folder)
 --
--- Data model recap: customers, products, orders, order_items (order grain
--- headers in `orders`, line items in `order_items`). See README.md for the
+-- Data model recap: customers, products, orders, order_items 
+-- See README.md for the
 -- data quality assumptions referenced below (file mislabeling, orphaned
 -- rows, order_total mismatches).
 
@@ -110,7 +110,6 @@ ORDER BY country, revenue_rank;
 -- Question 5: Build a Reusable SQL Model
 -- Order-fact view at the order grain. This generalises the mismatch
 -- logic from 3a into a reusable model -- 3a is effectively
--- `SELECT * FROM order_fact WHERE order_total_diff <> 0`.
 -- =====================================================================
 CREATE OR REPLACE VIEW order_fact AS
 WITH item_agg AS (
