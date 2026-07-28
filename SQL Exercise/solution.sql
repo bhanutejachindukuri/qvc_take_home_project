@@ -15,7 +15,7 @@ SELECT
     p.product_id,
     p.product_name,
     p.category,
-    SUM(oi.quantity)               AS total_quantity_sold,
+    SUM(oi.quantity) AS total_quantity_sold,
     SUM(oi.quantity * oi.unit_price) AS total_revenue
 FROM order_items oi
 JOIN orders o    ON o.order_id = oi.order_id
@@ -56,8 +56,8 @@ WITH item_sums AS (
 )
 SELECT
     o.order_id,
-    o.order_total                          AS recorded_order_total,
-    COALESCE(i.computed_total, 0)          AS computed_order_total,
+    o.order_total  AS recorded_order_total,
+    COALESCE(i.computed_total, 0)  AS computed_order_total,
     o.order_total - COALESCE(i.computed_total, 0) AS diff
 FROM orders o
 LEFT JOIN item_sums i ON i.order_id = o.order_id
@@ -73,7 +73,7 @@ WHERE o.order_id IS NULL;
 -- 3c. Duplicate customer emails.
 SELECT
     email,
-    COUNT(*)                              AS customer_count,
+    COUNT(*) AS customer_count,
     array_agg(customer_id ORDER BY customer_id) AS customer_ids
 FROM customers
 GROUP BY email
