@@ -162,6 +162,15 @@ checkpoints. Short version:
 - **Failure isolation per entity** — one failing entity is logged FAILED
   in the process log, the other eight still load, and the run is failed at
   the end so Monitor shows red.
+- **Actual landed raw-zone layout deviates from the design** — the two ADF
+  sink datasets ended up parameterised inconsistently (csv: entity as a
+  folder, no run_id; parquet: entity+run_id baked into the file name, no
+  entity folder). The notebook's `read_raw()` was adapted to both shapes
+  as-built rather than requiring a pipeline rebuild — full detail and the
+  one real consequence (csv entities aren't run-id-scoped, so a second run
+  should clear `raw/csv/<entity>/` first, or the sink should be fixed to
+  add a `run_id` folder segment) are in `adf/adf_pipeline_design.md`
+  ("Deviation actually observed") and `SETUP_GUIDE.md`'s ADLS appendix.
 - **Storage-key ADLS auth from Databricks** (via secret scope) for speed;
   production answer is Unity Catalog external locations / service
   principal. SSL disabled on the local Postgres link (container has no

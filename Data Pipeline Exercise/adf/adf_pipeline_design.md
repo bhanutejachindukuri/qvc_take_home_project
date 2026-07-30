@@ -62,12 +62,12 @@ apply to postgres rows, `folder`/`file` to csv rows.
 
 ## Linked services
 
-| Name | Type | Notes |
-|---|---|---|
-| `ls_adls` | Azure Data Lake Storage Gen2 | Auth: **system-assigned managed identity** of the factory; grant it *Storage Blob Data Contributor* on the storage account |
-| `ls_postgres_src` | PostgreSQL (V2 connector) | **connectVia: `shir-laptop`**; host `localhost`, port `5432`, database `olist`, user `qvc`, password from Key Vault (`pg-password`); **SSL mode: disable** (the local container runs without TLS — noted as exercise-grade) |
-| `ls_kv` | Azure Key Vault | Managed identity; grant the factory *Key Vault Secrets User* |
-| `ls_databricks` | Azure Databricks | Managed identity (grant the factory *Contributor* on the workspace) or PAT from Key Vault; cluster: **existing interactive cluster** (single node) |
+| Name                | Type                         | Notes                                                                                                                                                                                                                                                |
+| ------------------- | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ls_adls`         | Azure Data Lake Storage Gen2 | Auth:**system-assigned managed identity** of the factory; grant it *Storage Blob Data Contributor* on the storage account                                                                                                                    |
+| `ls_postgres_src` | PostgreSQL (V2 connector)    | **connectVia: `shir-laptop`**; host `localhost`, port `5432`, database `olist`, user `qvc`, password from Key Vault (`pg-password`); **SSL mode: disable** (the local container runs without TLS — noted as exercise-grade) |
+| `ls_kv`           | Azure Key Vault              | Managed identity; grant the factory*Key Vault Secrets User*                                                                                                                                                                                        |
+| `ls_databricks`   | Azure Databricks             | Managed identity (grant the factory*Contributor* on the workspace) or PAT from Key Vault; cluster: **existing interactive cluster** (single node)                                                                                            |
 
 ## Datasets
 
@@ -75,14 +75,14 @@ apply to postgres rows, `folder`/`file` to csv rows.
 dataset) because pipeline system variables are not available in dataset
 definitions — the Copy activities pass it in.
 
-| Dataset | Type | Parameters | Path / config | Serves |
-|---|---|---|---|---|
-| `ds_json_config` | JSON (`ls_adls`) | — | container `config`, file `entities.json` | the Lookup |
-| `ds_pg_table` | PostgreSQL table (`ls_postgres_src`) | `schema`, `table` | table = `@{dataset().schema}.@{dataset().table}` | source of `cp_pg_entity` |
-| `ds_adls_parquet_raw` | Parquet (`ls_adls`) | `entity`, `run_id` | container `raw`, folder `@{dataset().entity}/run_id=@{dataset().run_id}` | sink of `cp_pg_entity` |
-| `ds_adls_csv_inbox` | DelimitedText (`ls_adls`) | `folder`, `file` | container `inbox`, folder `@{dataset().folder}`, file `@{dataset().file}`; header true; quote `"`; **escape `"`** | source of `cp_csv_entity` |
-| `ds_adls_csv_raw` | DelimitedText (`ls_adls`) | `entity`, `run_id` | container `raw`, folder `@{dataset().entity}/run_id=@{dataset().run_id}`; header true; quote `"`; escape `"` | sink of `cp_csv_entity` |
-| `ds_adls_parquet_dbextract` | Parquet (`ls_adls`) | `entity` | container `dbextract`, folder `@{dataset().entity}`, file `@{dataset().entity}.parquet` | **fallback** source for `cp_pg_entity` |
+| Dataset                       | Type                                   | Parameters             | Path / config                                                                                                                    | Serves                                         |
+| ----------------------------- | -------------------------------------- | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| `ds_json_config`            | JSON (`ls_adls`)                     | —                     | container`config`, file `entities.json`                                                                                      | the Lookup                                     |
+| `ds_pg_table`               | PostgreSQL table (`ls_postgres_src`) | `schema`, `table`  | table =`@{dataset().schema}.@{dataset().table}`                                                                                | source of`cp_pg_entity`                      |
+| `ds_adls_parquet_raw`       | Parquet (`ls_adls`)                  | `entity`, `run_id` | *as designed:* container`raw`, folder `@{dataset().entity}/run_id=@{dataset().run_id}` — **as actually built here: container `olistdata`, static folder `raw/parquet`, `run_id`+`entity` went into the file name instead — see "Deviation" below*  | sink of`cp_pg_entity`                        |
+| `ds_adls_csv_inbox`         | DelimitedText (`ls_adls`)            | `folder`, `file`   | container`inbox`, folder `@{dataset().folder}`, file `@{dataset().file}`; header true; quote `"`; **escape `"`** — *as actually built: container `olistdata`, folder `inbox/@{dataset().folder}`* | source of`cp_csv_entity`                     |
+| `ds_adls_csv_raw`           | DelimitedText (`ls_adls`)            | `entity`, `run_id` | *as designed:* container`raw`, folder `@{dataset().entity}/run_id=@{dataset().run_id}` — **as actually built: container `olistdata`, folder `raw/csv/@{dataset().entity}`, no `run_id` in the path — see "Deviation" below**; header true; quote `"`; escape `"`              | sink of`cp_csv_entity`                       |
+| `ds_adls_parquet_dbextract` | Parquet (`ls_adls`)                  | `entity`             | container`dbextract`, folder `@{dataset().entity}`, file `@{dataset().entity}.parquet`                                     | **fallback** source for `cp_pg_entity` |
 
 Escape char `"` (not the default `\`) preserves the RFC-4180
 doubled-quote style the Olist files use.
@@ -97,26 +97,26 @@ doubled-quote style the Olist files use.
 
 ## Activities — exact settings
 
-| Activity | Setting | Value |
-|---|---|---|
-| `lkp_entities` (Lookup) | Source dataset | `ds_json_config` |
-| | **First row only** | **OFF** (returns the whole array) |
-| `flt_pg` (Filter) | Items | `@activity('lkp_entities').output.value` |
-| | Condition | `@equals(item().kind, 'postgres')` |
-| `flt_csv` (Filter) | Items | `@activity('lkp_entities').output.value` |
-| | Condition | `@equals(item().kind, 'csv')` |
-| `fe_pg` (ForEach) | Items | `@activity('flt_pg').output.Value`  ← capital **V** |
-| | Sequential | off (parallel); Batch count 5 |
-| `cp_pg_entity` (Copy, inside `fe_pg`) | Source dataset | `ds_pg_table` — `schema` = `@item().schema`, `table` = `@item().table` |
-| | Sink dataset | `ds_adls_parquet_raw` — `entity` = `@item().entity`, `run_id` = `@pipeline().RunId` |
-| | Mapping | none — 1:1 structural copy (transform lives in Spark) |
-| `fe_csv` (ForEach) | Items | `@activity('flt_csv').output.Value` |
-| | Sequential | off; Batch count 4 |
-| `cp_csv_entity` (Copy, inside `fe_csv`) | Source dataset | `ds_adls_csv_inbox` — `folder` = `@item().folder`, `file` = `@item().file` |
-| | Sink dataset | `ds_adls_csv_raw` — `entity` = `@item().entity`, `run_id` = `@pipeline().RunId` |
-| `nb_transform` (Databricks Notebook) | Depends on | `fe_pg` success **AND** `fe_csv` success |
-| | Notebook path | `/Shared/transform_olist` (`olist_transforms` imported alongside — the shell `%run`s `./olist_transforms`) |
-| | Base parameters | `run_id` = `@pipeline().RunId`; `raw_base_path` = `abfss://raw@<storageaccount>.dfs.core.windows.net` |
+| Activity                                    | Setting                  | Value                                                                                                               |
+| ------------------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------- |
+| `lkp_entities` (Lookup)                   | Source dataset           | `ds_json_config`                                                                                                  |
+|                                             | **First row only** | **OFF** (returns the whole array)                                                                             |
+| `flt_pg` (Filter)                         | Items                    | `@activity('lkp_entities').output.value`                                                                          |
+|                                             | Condition                | `@equals(item().kind, 'postgres')`                                                                                |
+| `flt_csv` (Filter)                        | Items                    | `@activity('lkp_entities').output.value`                                                                          |
+|                                             | Condition                | `@equals(item().kind, 'csv')`                                                                                     |
+| `fe_pg` (ForEach)                         | Items                    | `@activity('flt_pg').output.Value`  ← capital **V**                                                        |
+|                                             | Sequential               | off (parallel); Batch count 5                                                                                       |
+| `cp_pg_entity` (Copy, inside `fe_pg`)   | Source dataset           | `ds_pg_table` — `schema` = `@item().schema`, `table` = `@item().table`                                   |
+|                                             | Sink dataset             | `ds_adls_parquet_raw` — `entity` = `@item().entity`, `run_id` = `@pipeline().RunId`                      |
+|                                             | Mapping                  | none — 1:1 structural copy (transform lives in Spark)                                                              |
+| `fe_csv` (ForEach)                        | Items                    | `@activity('flt_csv').output.Value`                                                                               |
+|                                             | Sequential               | off; Batch count 4                                                                                                  |
+| `cp_csv_entity` (Copy, inside `fe_csv`) | Source dataset           | `ds_adls_csv_inbox` — `folder` = `@item().folder`, `file` = `@item().file`                               |
+|                                             | Sink dataset             | `ds_adls_csv_raw` — `entity` = `@item().entity`, `run_id` = `@pipeline().RunId`                          |
+| `nb_transform` (Databricks Notebook)      | Depends on               | `fe_pg` success **AND** `fe_csv` success                                                                  |
+|                                             | Notebook path            | `/Shared/transform_olist` (`olist_transforms` imported alongside — the shell `%run`s `./olist_transforms`) |
+|                                             | Base parameters          | `run_id` = `@pipeline().RunId`; `raw_base_path` = `abfss://raw@<storageaccount>.dfs.core.windows.net` — *as actually built: `abfss://olistdata@<storageaccount>.dfs.core.windows.net/raw`*       |
 
 Build tip: before wiring the full graph, Debug once with a temporary
 2-item `entities.json` (one postgres row + one csv row — e.g. customers +
@@ -145,6 +145,33 @@ as the production choice in the README.
   author and the friendliest canvas screenshot, but every new table is a
   pipeline edit, and nine near-identical activities is repetition the
   config file exists to remove.
+
+## Deviation actually observed in this build
+
+The build in this project used a single `olistdata` container (folder
+`raw/` inside it, rather than a separate `raw` container) — fine, purely
+cosmetic. Less fine: the two sink datasets ended up parameterised
+**inconsistently**. `ds_adls_csv_raw`'s Directory correctly includes
+`@{dataset().entity}` (→ `raw/csv/<entity>/`), but its file name was left
+to ADF's auto-generated default with no `run_id` anywhere in the path.
+`ds_adls_parquet_raw` went the other way — its Directory is a **static**
+`raw/parquet` with `@{dataset().entity}` and `@{dataset().run_id}`
+concatenated into the **file name** field instead
+(`orders083ead2f-75c9-4bf8-8a76-80da2c1bf691`, no extension), so every
+entity's parquet lands flat in the same folder.
+
+The notebook (`read_raw()` in `transform_olist.py`) was adapted to read
+both shapes as-built — see the "as actually built" tree in
+`SETUP_GUIDE.md`'s ADLS appendix — rather than requiring a pipeline
+rebuild. Net effect: the parquet side is still run-scoped (RunId is in
+the filename) but the csv side is **not** — a second run risks doubling
+csv-sourced entity rows unless the folder is cleared first. **Durable
+fix**, if there's time before a second run: edit `ds_adls_csv_raw`'s
+Directory to `raw/csv/@{dataset().entity}/run_id=@{dataset().run_id}`
+(add a `run_id` dataset parameter, wire `cp_csv_entity`'s sink to pass
+`run_id = @pipeline().RunId`, matching how `ds_adls_parquet_raw` was
+*supposed* to work), then update `read_raw`'s csv branch back to a
+run_id-scoped path.
 
 ## Gotchas encountered / to expect
 

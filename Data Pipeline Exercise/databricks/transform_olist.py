@@ -1,9 +1,10 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC # Olist transform notebook (raw → curated)
-# MAGIC Reads the raw files landed by ADF in ADLS (`raw/<entity>/run_id=<id>/` —
-# MAGIC parquet for the five transactional extracts, csv snapshots for the four
-# MAGIC reference files), applies the transformations defined in
+# MAGIC Reads the raw files landed by ADF in ADLS — csv reference files under
+# MAGIC `<raw base>/csv/<entity>/`, Postgres-sourced parquet flat under
+# MAGIC `<raw base>/parquet/` named `<entity><RunId>` (see `read_raw` below for
+# MAGIC why the two shapes differ) — applies the transformations defined in
 # MAGIC `olist_transforms` (rename / cast / null handling / dedup / DQ flags /
 # MAGIC ingestion metadata), writes typed tables to Azure SQL via JDBC, and logs
 # MAGIC per-entity row counts to `etl.pipeline_process_log`.
@@ -24,10 +25,12 @@ from pyspark.sql import types as T
 # Parameters (supplied by ADF: @pipeline().RunId and the raw folder path).
 # `only_entity` is a debug aid for the interactive smoke test: set it to a
 # single entity name (e.g. product_category_translation) to process just
-# that one; leave empty for the full 9-entity run.
+# that one; leave empty for the full 9-entity run. For a manual csv smoke
+# test, just drop a file straight into raw/csv/<entity>/ — no run_id
+# subfolder needed, see read_raw().
 
 dbutils.widgets.text("run_id", "manual-local-run")
-dbutils.widgets.text("raw_base_path", "abfss://raw@<storageaccount>.dfs.core.windows.net")
+dbutils.widgets.text("raw_base_path", "abfss://olistdata@<storageaccount>.dfs.core.windows.net/raw")
 dbutils.widgets.text("only_entity", "")
 
 RUN_ID = dbutils.widgets.get("run_id")
@@ -128,10 +131,32 @@ def log_process(entity: str, stage: str, rows_read, rows_written,
 
 
 def read_raw(entity: str, cfg: dict) -> DataFrame:
-    path = f"{RAW}/{entity}/run_id={RUN_ID}/"
+    # The two ADF loops land data in DIFFERENT shapes (confirmed against
+    # the actual storage browser output, not the originally designed
+    # per-entity/run_id-folder layout for both — see README "Actual ADLS
+    # layout" note):
+    #   csv (inbox-sourced):   <raw>/csv/<entity>/<whatever ADF named it>
+    #                          — a normal folder; read the whole directory.
+    #   parquet (Postgres-sourced): <raw>/parquet/<entity><RunId>[.ext]
+    #                          — FLAT, no entity folder; the sink's file-name
+    #                          expression baked entity+RunId together instead
+    #                          of using them as folder segments. RUN_ID here
+    #                          is exactly ADF's @pipeline().RunId, so the
+    #                          current run's file is deterministically
+    #                          "<entity><RUN_ID>" (extension uncertain from
+    #                          the storage browser view, hence the glob).
     if cfg["source_kind"] == "csv":
+        path = f"{RAW}/csv/{entity}/"
         return spark.read.schema(cfg["csv_schema"]).option("header", "true").csv(path)
-    return spark.read.parquet(path)
+
+    prefix = f"{entity}{RUN_ID}"
+    matches = [f.path for f in dbutils.fs.ls(f"{RAW}/parquet/") if f.name.startswith(prefix)]
+    if len(matches) != 1:
+        raise Exception(
+            f"{entity}: expected exactly 1 file starting with '{prefix}' under "
+            f"{RAW}/parquet/, found {len(matches)}: {matches}. If ADF's sink "
+            f"naming changed, update read_raw() in transform_olist.py.")
+    return spark.read.parquet(matches[0])
 
 
 failures = []
@@ -174,7 +199,7 @@ if not ONLY_ENTITY or ONLY_ENTITY == "geolocation":
         geo_raw = (
             spark.read.schema(GEOLOCATION_SCHEMA)
             .option("header", "true")
-            .csv(f"{RAW}/geolocation/run_id={RUN_ID}/")
+            .csv(f"{RAW}/csv/geolocation/")
         )
         n_read = geo_raw.count()
         geo_dim = aggregate_geolocation(geo_raw, RUN_ID)

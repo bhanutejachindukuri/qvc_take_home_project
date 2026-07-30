@@ -223,50 +223,78 @@ the scoring weight.
 
 Container and folder names are load-bearing: the ADF datasets and the
 notebook build paths from these exact lowercase strings (the entity names
-match `ENTITY_CONFIG` keys). Create only the containers — ADF creates the
-`raw` subfolders itself on the first run.
+match `ENTITY_CONFIG` keys).
+
+### As designed (one container per zone)
 
 ```
 <storage account>  (hierarchical namespace ENABLED)
 │
-├── config/                       ← manual upload, once (drives the pipeline)
-│   └── entities.json             (from adf/config/entities.json — the
-│                                  Lookup reads it; 9 entity definitions)
-│
-├── inbox/                        ← manual upload, once (file source)
-│   ├── products/olist_products_dataset.csv                        (~2.3 MB)
-│   ├── sellers/olist_sellers_dataset.csv                          (~0.2 MB)
-│   ├── geolocation/olist_geolocation_dataset.csv                  (~61 MB)
-│   └── product_category_translation/product_category_name_translation.csv
-│
-├── raw/                          ← written ONLY by ADF; starts EMPTY
-│   │                               (one run_id folder per entity per run —
-│   │                                that is the reproducibility feature)
-│   ├── orders/run_id=<ADF RunId>/                 *.parquet
-│   ├── customers/run_id=<ADF RunId>/              *.parquet
-│   ├── order_items/run_id=<ADF RunId>/            *.parquet
-│   ├── order_payments/run_id=<ADF RunId>/         *.parquet
-│   ├── order_reviews/run_id=<ADF RunId>/          *.parquet
-│   ├── products/run_id=<ADF RunId>/               *.csv (snapshot)
-│   ├── sellers/run_id=<ADF RunId>/                *.csv
-│   ├── geolocation/run_id=<ADF RunId>/            *.csv
-│   ├── product_category_translation/run_id=<ADF RunId>/  *.csv
-│   └── product_category_translation/run_id=manual-smoke/ ← Phase 4 only:
-│                                     upload the translation csv here by
-│                                     hand for the Databricks smoke test
-│
-└── dbextract/                    ← FALLBACK ONLY (Phase 2c; skip otherwise)
-    ├── orders/orders.parquet                    (~10 MB)
-    ├── customers/customers.parquet              (~7 MB)
-    ├── order_items/order_items.parquet          (~6.5 MB)
-    ├── order_payments/order_payments.parquet    (~4 MB)
-    └── order_reviews/order_reviews.parquet      (~9 MB)
+├── config/    entities.json
+├── inbox/     <entity>/<original filename>.csv     (4 reference files)
+├── raw/       <entity>/run_id=<ADF RunId>/  *.parquet|*.csv
+└── dbextract/ <entity>/<entity>.parquet             (fallback only)
 ```
 
-The notebook reads `abfss://raw@<storageaccount>.dfs.core.windows.net/`
-(`raw` is the container in the URL) + `<entity>/run_id=<RUN_ID>/`. Old
-`run_id=` folders accumulate by design; production would apply lifecycle
-management (cool/archive) to them.
+### As actually built in this run (single `olistdata` container)
+
+The real build in this project put everything in one container
+(`olistdata`) with `raw` as a folder, and the two ADF loops ended up
+landing data in **different shapes** — the notebook's `read_raw()` handles
+both explicitly:
+
+```
+olistdata/                        (container; HNS enabled)
+├── raw/
+│   ├── csv/                      ← ForEach_csv sink: entity as FOLDER
+│   │   ├── products/<ADF-generated file>
+│   │   ├── sellers/<ADF-generated file>
+│   │   ├── geolocation/<ADF-generated file>
+│   │   └── product_category_translation/<ADF-generated file>
+│   │
+│   └── parquet/                  ← ForEach_postgresql sink: FLAT —
+│       ├── orders<RunId>              entity+RunId ended up baked into
+│       ├── customers<RunId>           the FILE NAME instead of a folder
+│       ├── order_items<RunId>         (no entity subfolder, no extension
+│       ├── order_payments<RunId>      visible in the storage browser)
+│       └── order_reviews<RunId>
+```
+
+**Read contract that matches this** (`transform_olist.py::read_raw`):
+csv entities read the whole `raw/csv/<entity>/` folder (run_id is NOT
+part of the csv path — see the rerun caveat below); parquet entities read
+the exact file `raw/parquet/<entity><RUN_ID>` (glob-matched, since
+`RUN_ID` is literally `@pipeline().RunId` and is what's embedded in the
+filename — so it IS still run-scoped, just via filename instead of a
+folder). `raw_base_path` widget = `abfss://olistdata@<storageaccount>.dfs.core.windows.net/raw`.
+
+**Known limitation — flag, don't hide:** because csv reads glob the whole
+entity folder with no run_id filter, if ADF's csv sink auto-generates a
+new uniquely-named file on every run without clearing the old one, a
+SECOND run would accumulate two files in e.g. `raw/csv/products/` and the
+notebook would silently read both (double-counting products). This has
+not caused an issue yet because only one run has happened. **Before a
+second full run**, either (a) clear each `raw/csv/<entity>/` folder
+first, or (b) fix `ds_adls_csv_raw`'s Directory to include
+`run_id=@{dataset().run_id}` as a real folder segment (restores full
+run-scoping) and update `read_raw` to filter on it again. The parquet
+side does not have this problem — its filename already embeds `RUN_ID`
+uniquely per run.
+
+**Phase 4 smoke test, adjusted for this layout:** drop the translation
+CSV straight into `raw/csv/product_category_translation/` — no run_id
+subfolder needed for csv entities.
+
+### `dbextract/` (fallback only — Phase 2c; skip otherwise)
+
+```
+olistdata/dbextract/
+├── orders/orders.parquet                    (~10 MB)
+├── customers/customers.parquet              (~7 MB)
+├── order_items/order_items.parquet          (~6.5 MB)
+├── order_payments/order_payments.parquet    (~4 MB)
+└── order_reviews/order_reviews.parquet      (~9 MB)
+```
 
 ## Evidence file naming
 
