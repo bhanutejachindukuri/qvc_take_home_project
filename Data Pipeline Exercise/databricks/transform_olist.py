@@ -125,6 +125,22 @@ def log_process(entity: str, stage: str, rows_read, rows_written,
 # MAGIC %run ./olist_transforms
 
 # COMMAND ----------
+# Fail loudly on a bad only_entity value instead of silently processing
+# zero entities and still reporting SUCCESS. Without this check, a typo'd
+# or stale widget value makes every entity's "if entity != ONLY_ENTITY:
+# continue" skip fire and the geolocation cell's guard skip too — the loop
+# does no work, touches no data, calls log_process() zero times, and the
+# run still exits SUCCESS in a couple of seconds. A fast "successful" run
+# with nothing written anywhere is the signature of exactly this.
+
+_VALID_ENTITIES = set(ENTITY_CONFIG.keys()) | {"geolocation"}
+if ONLY_ENTITY and ONLY_ENTITY not in _VALID_ENTITIES:
+    raise Exception(
+        f"only_entity = '{ONLY_ENTITY}' does not match any known entity. "
+        f"Valid values: {sorted(_VALID_ENTITIES)}. Leave the widget blank "
+        f"to process all 9 entities.")
+
+# COMMAND ----------
 # MAGIC %md ## The 8 uniform entities (config-driven)
 # MAGIC One loop over `ENTITY_CONFIG`. Per entity: read raw → transform →
 # MAGIC JDBC truncate-load → process log. A failing entity is logged as
