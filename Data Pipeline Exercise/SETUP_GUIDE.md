@@ -137,9 +137,15 @@ an empty result (not an error) → screenshot (`03_target_ddl.png`).
 3. Install the Databricks CLI locally (`pip install databricks-cli`) and
    configure it: `databricks configure --token` → paste your workspace URL
    and the PAT from step 2.
-4. Create the **native** (non-Key-Vault) secret scope and its 5 secrets:
+4. Create the **native** (non-Key-Vault) secret scope and its 5 secrets.
+   The CLI defaults to making the creating user the scope's sole admin,
+   which needs Premium tier; on a **Standard tier** workspace that's
+   rejected (`BAD_REQUEST: Premium Tier is disabled ... initial_manage_principal
+   "users"`) — pass `--initial-manage-principal users` explicitly, which
+   Standard tier does allow (it grants MANAGE to every workspace user; on
+   a single-user workspace that's no different in practice):
    ```powershell
-   databricks secrets create-scope --scope olist-secrets
+   databricks secrets create-scope --scope olist-secrets --initial-manage-principal users
    databricks secrets put --scope olist-secrets --key sql-server-name --string-value "<server, no .database.windows.net>"
    databricks secrets put --scope olist-secrets --key sql-db-name --string-value "<db name>"
    databricks secrets put --scope olist-secrets --key sql-user --string-value "<admin user>"
