@@ -6,3 +6,9 @@ venv/
 *.egg-info/
 .DS_Store
 Thumbs.db
+
+# Data Pipeline Exercise: local harness output + guard against committing the
+# Kaggle Olist CSVs (~126 MB; they live in Downloads / Postgres / blob, not git)
+Data Pipeline Exercise/local_test/output/
+olist_*.csv
+product_category_name_translation.csv

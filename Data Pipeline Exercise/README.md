@@ -1,149 +1,234 @@
-# Data Pipeline Exercise
+# Cloud data pipeline — Olist e-commerce (ADF + Databricks + Azure SQL)
 
-A cloud data pipeline that ingests a CSV from Blob Storage and a table from a
-managed Postgres database, transforms both, and lands them in Azure SQL Database
-for querying.
+An ELT pipeline over the complete Kaggle **Olist Brazilian e-commerce
+dataset** (all 9 files, ~1.55M source rows): ingests from two source types —
+CSV files in cloud object storage and relational tables in PostgreSQL —
+transforms with PySpark on Azure Databricks, and loads typed, query-ready
+tables into Azure SQL Database, with per-entity process logging,
+reconciliation and data-quality flags built in. Every transformation was
+verified locally against the full real dataset (34/34 automated checks)
+before the first cloud run.
 
-> **Status:** implementation files and setup scripts are complete; the Azure
-> resources and pipeline run itself still need to be executed by hand in the
-> Portal/ADF Studio/Databricks workspace. See `TODO` markers below for what to
-> fill in with real values/screenshots once that run happens.
+> **Note on the relational source (per the brief: "if you substitute
+> Oracle, mention it clearly"):** Oracle was substituted with
+> **PostgreSQL 16**. Azure Database for PostgreSQL could not be provisioned
+> in the available subscription, so the source is a local Docker Postgres
+> reached by ADF through a **Self-Hosted Integration Runtime** — the same
+> connector pattern used for on-prem Oracle sources in production
+> pipelines, just pointed at Postgres. A verified fallback (typed parquet
+> extracts of the same five tables, copied by ADF from a `dbextract`
+> container) is included and swaps in with a single source-dataset change;
+> everything downstream is identical either way.
 
 ## Architecture
 
 ```
-Azure Blob Storage              Azure DB for PostgreSQL
-container: raw-csv              Flexible Server (Burstable)
-  -> products.csv                 -> table: orders
-         |                                |
-         +----------------+---------------+
-                          v
-              ADF Notebook Activity
-              -> Azure Databricks (new job cluster,
-                 spins up per run, terminates after)
-              notebook: transform_ecommerce
-                - standardize column names
-                - handle nulls / type issues
-                - add ingestion_timestamp
-                          |
-                          v
-              Azure SQL Database (serverless, auto-pause)
-              dbo.products_loaded   dbo.orders_loaded
+PostgreSQL 16 (Docker, on-prem-style)        ADLS Gen2 inbox container
+src.orders · src.customers · src.order_items   products · sellers · geolocation
+src.order_payments · src.order_reviews         · category translation (CSV)
+        │  via Self-Hosted                            │
+        │  Integration Runtime                        │
+        └───────────► Azure Data Factory ◄────────────┘
+                9 parallel Copy activities
+                          │
+        ADLS Gen2 raw zone — raw/<entity>/run_id=<ADF RunId>/
+        (typed parquet for the 5 relational entities, csv snapshots
+         for the 4 file entities)
+                          │
+        Azure Databricks — transform_olist + olist_transforms
+        config-driven: rename · cast · null handling · dedup ·
+        DQ flags · ingestion metadata · per-entity process logging
+        + bespoke geolocation aggregation (1,000,163 pts → 19,015 zips)
+                          │  (JDBC, truncate-load)
+        Azure SQL Database (serverless)
+        ├── curated schema  → 9 typed tables
+        ├── etl schema      → pipeline_process_log (reconciliation)
+        └── mart schema     → v_sales_overview · v_payment_mix ·
+                              v_review_delivery
 ```
 
-Orchestration: a single Azure Data Factory pipeline, `pl_ecommerce_ingest`,
-with one Notebook Activity that runs `databricks/transform_ecommerce.py` on a
-Databricks job cluster (created fresh per run, torn down after — this is a
-cost control choice, not the default "always-on interactive cluster").
+Design principles carried over from the layered enterprise DWH pattern:
 
-## Services used, and why
+- **Dumb ingestion, smart transformation.** Copy activities do 1:1
+  structural moves only; a transform bug never forces re-extraction.
+- **Run-scoped raw zone.** Every run lands under
+  `raw/<entity>/run_id=<guid>` — each run is reproducible against its
+  exact input.
+- **Flag, don't drop.** Invalid payment types and impossible delivery
+  dates are kept and flagged; legitimate business nulls (undelivered
+  orders) are preserved and documented.
+- **Operational metadata everywhere.** Every curated row carries
+  `ingestion_timestamp` + `pipeline_run_id`; every entity load writes
+  read/written/flagged counts to `etl.pipeline_process_log`.
+- **Verify before you spend.** The whole transform layer runs locally
+  against the real files first (`local_test/`); the cloud phases only have
+  to prove the seams (auth, copies, JDBC).
 
-| Service | Role | Why |
+## Services used
+
+| Service | Role | Why this one |
 |---|---|---|
-| Azure Blob Storage | CSV source | Simplest, cheapest object storage for a single small file; no need for Data Lake Gen2 hierarchical namespace at this scale. |
-| Azure Database for PostgreSQL Flexible Server | Relational DB source | The brief prefers Oracle; PostgreSQL is an explicitly acceptable substitute (see Assumptions below) and is what the rest of this take-home already uses, keeping tooling consistent. Burstable tier keeps cost minimal for a throwaway resource. |
-| Azure Databricks | Transform compute | Chosen over ADF Mapping Data Flows specifically because Data Flows get hard to maintain as the number of pipelines grows — a lesson from hands-on production experience. A single PySpark notebook expresses the standardize/null-handle/cast/timestamp logic more directly and scales better as source count grows. A **new job cluster** (not an interactive one) keeps compute cost to the duration of the actual run. |
-| Azure Data Factory | Orchestration | Explicitly encouraged in the brief as "closest to [QVC's] current stack." Used here purely for scheduling/monitoring/parameter-passing into the Databricks notebook, not for the transform logic itself. |
-| Azure SQL Database | Target | Serverless tier with auto-pause — a small, throwaway analytical target that costs nothing while idle. Target tables are pre-created via DDL (`sql/create_target_tables.sql`) rather than left to auto-create, so column names/types are explicit and reviewable independent of the pipeline code. |
+| Azure Data Factory | Orchestration + ingestion | Required-stack fit; Copy activity covers both source connectors natively; the SHIR demonstrates the on-prem-source pattern; dependency graph + Monitor give free observability |
+| Self-Hosted Integration Runtime | Bridge to the local Postgres | The relational source lives outside Azure — exactly how on-prem Oracle is reached in production ADF setups |
+| ADLS Gen2 | Landing zones (`inbox`, `raw`) | Decouples extraction from transformation; parquet as the typed intermediate |
+| Azure Databricks (PySpark) | Transformation | Set-based, testable transforms; config-driven entity pipeline + window-function dedup are natural in Spark; the pure-module split makes the logic locally testable |
+| Azure SQL Database (serverless) | Analytical target | Queryable SQL target required; auto-pause keeps cost near zero; Synapse dedicated pools disproportionate for ~570k curated rows |
+| Azure Key Vault | Secrets | Single source of truth, consumed by ADF linked services and the Databricks secret scope (`kv-olist`) |
 
-## Setup / run steps
+### Alternatives considered
 
-1. Create a resource group (e.g. `qvc-pipeline-rg`) to hold everything below —
-   makes cleanup a single delete afterward.
-2. Create a storage account + Blob container `raw-csv`; upload `data/products.csv`.
-3. Create an Azure Database for PostgreSQL Flexible Server (Burstable B1ms); allow
-   access from Azure services; run `sql/seed_orders_postgres.sql` against it to
-   create and seed the `orders` table.
-4. Create an Azure SQL Database (serverless, auto-pause enabled); run
-   `sql/create_target_tables.sql` against it to pre-create `dbo.products_loaded`
-   and `dbo.orders_loaded`.
-5. Create an Azure Databricks workspace (Standard tier). In it:
-   - Create a Databricks-backed secret scope named `adf-pipeline-secrets` with
-     three secrets: `storage-account-key`, `postgres-password`, `sql-password`.
-   - Import `databricks/transform_ecommerce.py` as a notebook.
-   - Confirm the Postgres JDBC driver is available (bundled with the Databricks
-     Runtime); if the SQL Server JDBC driver isn't preinstalled, attach it as a
-     cluster library (Maven coordinate `com.microsoft.sqlserver:mssql-jdbc`).
-6. Create an Azure Data Factory instance. In ADF Studio:
-   - Add an Azure Databricks linked service pointing at the workspace, configured
-     with **New job cluster** (smallest single-node config, e.g. `Standard_DS3_v2`).
-   - Create pipeline `pl_ecommerce_ingest` with a single Notebook Activity
-     referencing `transform_ecommerce`, passing the non-secret connection details
-     (storage account name, Postgres host, SQL Server host, etc.) as base
-     parameters matching the widget names in the notebook.
-7. Trigger the pipeline manually; confirm "Succeeded" in the Monitor tab.
-8. Query both target tables to confirm the data landed correctly.
+| Option | Verdict |
+|---|---|
+| ADF Mapping Data Flows | Rejected: Spark-cluster spin-up cost/latency for renames+casts; logic buried in ADF JSON is hard to review |
+| T-SQL stored procedures (pure ELT in target) | Strong option, deliberately not chosen — demonstrates Spark-based transformation; sprocs would win if the target owned all compute |
+| dbt on the target | Best long-term home for transform logic (tests, lineage, docs); out of proportion for this scope — noted as the production evolution |
+| 2 parameterised ForEach loops instead of 9 explicit copies | Documented as the evolution at higher table counts; explicit copies chosen for Monitor observability (per-copy row counts) and a canvas that shows the whole flow |
+| Full 1M-row geolocation load to SQL | Rejected — see the judgement call below |
 
-## Assumptions / trade-offs
+## Data model & transformations
 
-- **Oracle substituted with PostgreSQL.** The brief's preferred relational source
-  is Oracle; PostgreSQL is used instead (explicitly listed as an acceptable
-  alternative) to stay consistent with the Postgres tooling already used
-  elsewhere in this take-home.
-- **Small sample data, reused from the SQL Exercise.** `products.csv` (6 rows)
-  and the seed for the `orders` table (10 rows) are the SQL Exercise's own
-  already-corrected CSVs, not new/larger data. The brief itself frames this as
-  "not a fully production-ready solution" — volume wasn't the point being tested.
-- **Overwrite, not incremental, load.** Each run truncates and reloads both
-  target tables (`truncate=true` on the JDBC writer, preserving the pre-created
-  schema rather than letting Spark infer/recreate it). Fine for a one-off
-  demonstration; a real recurring pipeline would need an incremental pattern
-  (see below).
-- **Secrets via a Databricks-backed secret scope**, not hardcoded and not passed
-  as plain ADF pipeline parameters. A production setup would back this scope
-  with Azure Key Vault instead — simplified here for time.
-- **Job cluster, not an interactive/always-on cluster.** Slower per-run
-  (cold-start overhead) but avoids leaving paid compute running idle between
-  runs — the right trade-off for a resource that's mostly not running.
+All row counts verified empirically against the real files by the local
+harness (`01_local_harness.png`).
 
-## Optimizing this pipeline for a recurring daily/monthly run
+| Entity | Source | Rows in → curated | Key transformations |
+|---|---|---|---|
+| orders | Postgres | 99,441 → 99,441 | 5 timestamp casts, lower-cased status, `is_valid_delivery_date` flag (0 flagged — a contract check), dedup on `order_id` |
+| customers | Postgres | 99,441 → 99,441 | `INITCAP` city, upper state, dedup; `customer_unique_id` documented as the person-level key (`customer_id` is per-order) |
+| order_items | Postgres | 112,650 → 112,650 | int/decimal/timestamp casts, dedup on (`order_id`,`order_item_id`) |
+| order_payments | Postgres | 103,886 → 103,886 | casts, lower-cased type, `is_valid_payment` flag — catches exactly **3** `not_defined` rows, kept not dropped |
+| order_reviews | Postgres | 99,224 → 99,224 | multiline-quoted CSV parsed at seed time (99,224 records, not the naive ~104.7k line count); `review_id` alone is NOT unique (789 duplicates) → key is (`review_id`,`order_id`); score-domain flag (0 flagged) |
+| products | inbox CSV | 32,951 → 32,951 | rename `*_lenght` typo columns, 7 int casts, `COALESCE(category,'unknown')` (**610** nulls), dedup |
+| sellers | inbox CSV | 3,095 → 3,095 | `INITCAP` city, upper state, dedup |
+| geolocation | inbox CSV | 1,000,163 → **19,015** | zip-prefix-grain dimension (below) |
+| category translation | inbox CSV | 71 → 71 | UTF-8 BOM neutralized by explicit-schema read; 71 rows (naive line counts say 70 — no trailing newline); 2 categories in products have no translation (`pc_gamer`, `portateis_cozinha_e_preparadores_de_alimentos`) → mart falls back to the Portuguese name |
 
-- **Incremental loads instead of full overwrite.** Add a watermark column
-  (e.g. `updated_at` on the source `orders` table, or an ETag/last-modified
-  check on the Blob file) and only pull rows newer than the last successful
-  run's watermark, merging (`MERGE`/upsert) into the target instead of
-  truncate-and-reload.
-- **A schedule or tumbling-window trigger** in ADF, with retry policy and
-  failure alerting wired to Azure Monitor / Log Analytics (e.g. an action group
-  emailing on pipeline failure), rather than the manual trigger used here.
-- **Cluster pooling** in Databricks to cut the job cluster's cold-start time on
-  each scheduled run, or a small always-warm pool if runs are frequent enough
-  to justify it.
-- **Partition the target tables** (e.g. by ingestion date) once volume grows
-  past what a single unpartitioned table can serve efficiently — not needed at
-  this row count.
-- **Schema drift handling** — the source CSV/table could change shape over
-  time; a production version would validate incoming schema against an
-  expected contract before writing, and route mismatches to a
-  quarantine/exceptions path rather than failing the whole run silently.
-- **Move secrets to Key Vault-backed scopes** and parameterize environment
-  (dev/test/prod) via ADF global parameters instead of hardcoded resource names.
+### The geolocation judgement call
+
+The raw file is a 1,000,163-row point cloud with no key — many rows per zip
+prefix. Its only consumers (`customers` / `sellers`) join at **zip-prefix
+grain**, and a 1M-row JDBC truncate-load into min-capacity serverless SQL
+costs minutes-to-tens-of-minutes per run for a table nothing can join at
+that grain. So: ADF still lands all 1M rows in raw (dumb ingestion,
+full fidelity retained), and the curated table is a **19,015-row zip
+dimension** — centroid lat/lng averaged over points inside a Brazil
+bounding box (29 out-of-bounds points excluded from centroids but counted
+in `invalid_point_count`; 4 zips whose points are all invalid kept with
+NULL coordinates), modal city/state, `point_count` per zip. The process
+log shows `rows_read=1,000,163 / rows_written=19,015` — a deliberate,
+documented grain change, not a reconciliation failure.
+
+### Consumption layer (mart)
+
+- `mart.v_sales_overview` — orders, GMV and avg delivery days by state ×
+  **English** category name (translation LEFT JOIN with Portuguese
+  fallback); delivered + DQ-valid orders only.
+- `mart.v_payment_mix` — order coverage, value share and instalment
+  behaviour per payment type (credit_card 76,795 / boleto 19,784 /
+  voucher 5,775 / debit_card 1,529 payments; the 3 `not_defined` rows are
+  excluded here, visible in the DQ evidence).
+- `mart.v_review_delivery` — avg delivery days and %-late per review score
+  (1★ 11,424 · 2★ 3,151 · 3★ 8,179 · 4★ 19,142 · 5★ 57,328) — makes the
+  late-delivery→bad-review story queryable.
+
+## Setup and run
+
+See [SETUP_GUIDE.md](SETUP_GUIDE.md) for the phased build with
+checkpoints. Short version:
+
+0. `python local_test/run_local_transforms.py` → 34/34 checks against the
+   real files (also builds the fallback extracts).
+1. Create Key Vault (6 secrets) + install the SHIR; verify storage HNS;
+   create containers; SQL firewall.
+2. Seed sources: 5 `\copy` loads into Docker Postgres
+   (`postgres_source/postgres_seed.sql`) + 4 CSVs to `inbox/`.
+3. Run `sql/01_azure_sql_ddl.sql` on Azure SQL.
+4. Import `databricks/*.ipynb` to `/Shared`; secret scope `kv-olist`;
+   71-row smoke run (`only_entity` widget).
+5. Build `pl_olist_ingest` per `adf/adf_pipeline_design.md`; Debug run.
+6. Evidence: `sql/02_evidence_queries.sql` + screenshots into `evidence/`.
+
+## Assumptions & trade-offs
+
+- **Local Docker Postgres behind a SHIR as the relational source** — Azure
+  PG was not provisionable in this subscription; the SHIR pattern is the
+  honest equivalent of production on-prem sources, at the cost of the
+  laptop needing to be up during runs. The **verified parquet-extract
+  fallback** removes even that risk for re-runs.
+- **Full reload (truncate-load) per run** — appropriate for the volume and
+  scope; incremental is designed but not implemented (below). JDBC
+  `truncate=true` preserves the typed DDL contract instead of letting
+  Spark re-infer tables.
+- **Failure isolation per entity** — one failing entity is logged FAILED
+  in the process log, the other eight still load, and the run is failed at
+  the end so Monitor shows red.
+- **Storage-key ADLS auth from Databricks** (via secret scope) for speed;
+  production answer is Unity Catalog external locations / service
+  principal. SSL disabled on the local Postgres link (container has no
+  TLS) — exercise-grade, called out in the ADF doc.
+- **Single-node smallest Databricks cluster, 15-min auto-terminate** —
+  right-sized (~1.55M rows total); the transforms are partition-agnostic
+  and scale to a multi-node cluster unchanged.
+- **Local verification instead of unit tests** — within the timebox, the
+  assertion harness (34 checks over the full dataset, including exact DQ
+  distributions) plus the process-log reconciliation gives stronger
+  evidence than a couple of token unit tests would; the pure-module split
+  (`olist_transforms.py` has no dbutils/JDBC) is what makes that possible,
+  and is also the seam where pytest would attach in a production repo.
+
+## Productionising for a daily/monthly schedule
+
+1. **Incremental extraction:** watermark control table
+   (`etl.load_watermarks`); ADF Lookup reads the high-water mark, the
+   Postgres copy's query becomes `WHERE updated_at > @watermark`;
+   CDC/Debezium if the source gains change tracking.
+2. **Merge instead of truncate-load:** stage + keyed `MERGE` into curated;
+   opens the door to SCD2 on customers/sellers.
+3. **Reference data cadence:** the geolocation dimension and category
+   translation are slowly changing — refresh monthly, not per run.
+4. **Trigger & recovery:** tumbling-window trigger with retry instead of a
+   schedule trigger; idempotency already guaranteed by run-scoped raw
+   folders (+ keyed merges once added).
+5. **Alerting & observability:** Azure Monitor alerts on pipeline failure
+   and on reconciliation drift from the process log; lifecycle management
+   on the raw zone (cool/archive tiers).
+6. **Security hardening:** private endpoints, managed identity end-to-end
+   where supported, TLS to the source, secret rotation.
+7. **CI/CD:** factory attached to Git; notebooks + SQL versioned in this
+   repo already; transform logic migrated to dbt as the model count grows.
+8. **Cost at scale:** job clusters (spot-backed) instead of an interactive
+   cluster; partitioned parallel copies for large tables; Synapse/Fabric
+   only when volume justifies it.
 
 ## Evidence of execution
 
-<!-- TODO: fill in after running the pipeline -->
+See `evidence/` — local harness pass, seeded sources, DDL, Databricks
+smoke run, pipeline canvas, green Monitor run with per-copy row counts,
+process-log reconciliation, DQ distributions, mart outputs, trigger.
+<!-- TODO: drop in the 10 screenshots after the cloud run; fill in actual
+resource names and run duration here -->
 
-- [ ] `screenshots/pipeline_run_succeeded.png` — ADF Monitor tab showing the
-  pipeline run status as "Succeeded."
-- [ ] `screenshots/query_products_loaded.png` — query output against
-  `dbo.products_loaded` (expect 6 rows).
-- [ ] `screenshots/query_orders_loaded.png` — query output against
-  `dbo.orders_loaded` (expect 10 rows).
-
-## Repo contents
+## Repository layout
 
 ```
 Data Pipeline Exercise/
-  Data Pipeline Exercise.docx   # original brief
-  README.md                     # this file
-  sql/
-    create_target_tables.sql    # Azure SQL target DDL
-    seed_orders_postgres.sql    # Postgres source table DDL + seed data
-  data/
-    products.csv                # CSV source, staged for blob upload
-  databricks/
-    transform_ecommerce.py      # PySpark transform notebook source
-  adf/
-    pipeline_export/            # TODO: exported pipeline/linked-service JSON
-  screenshots/                  # TODO: execution evidence
+├── README.md
+├── SETUP_GUIDE.md                    phased build with checkpoints
+├── Data Pipeline Exercise.docx       original brief
+├── sql/
+│   ├── 01_azure_sql_ddl.sql          curated/etl/mart DDL (9 tables + 3 views)
+│   └── 02_evidence_queries.sql       run after the pipeline; screenshot grids
+├── databricks/
+│   ├── olist_transforms.py           pure transform module (source of truth)
+│   ├── transform_olist.py            notebook shell (widgets/JDBC/log/loop)
+│   ├── olist_transforms.ipynb        generated import-ready notebooks
+│   └── transform_olist.ipynb         (regenerate via local_test/make_notebooks.py)
+├── adf/
+│   └── adf_pipeline_design.md        build notes; exported factory JSON lands here
+├── postgres_source/
+│   └── postgres_seed.sql             src.* DDL + \copy loads (Docker Postgres)
+├── local_test/
+│   ├── run_local_transforms.py       34-check harness over the real files
+│   ├── build_dbextract_parquet.py    fallback extracts + harness input
+│   └── make_notebooks.py             .py → .ipynb converter
+└── evidence/                         screenshots (added after the cloud run)
 ```

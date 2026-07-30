@@ -1,7 +1,0 @@
-product_id,product_name,category,price,is_active
-101,Wireless Mouse,Electronics,25.00,true
-102,Mechanical Keyboard,Electronics,75.00,true
-103,USB-C Cable,Accessories,10.00,true
-104,Laptop Stand,Accessories,40.00,true
-105,27-inch Monitor,Electronics,220.00,true
-106,Desk Lamp,Home Office,35.00,false
