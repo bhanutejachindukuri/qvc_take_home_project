@@ -44,8 +44,8 @@ region as the existing resources):
    (Overview → "Data Lake Storage" should say enabled; if not: Settings →
    Data Lake Gen2 upgrade). `abfss://` access requires it — this is the one
    silent blocker among the pre-created resources.
-4. Storage account: create containers `inbox`, `raw` (create `dbextract`
-   too only if you end up on the fallback path, below).
+4. Storage account: create containers `config`, `inbox`, `raw` (create
+   `dbextract` too only if you end up on the fallback path, below).
 5. Azure SQL server → Networking: add your client IP; enable
    *Allow Azure services and resources to access this server*.
 
@@ -98,9 +98,9 @@ If the SHIR/Postgres path fails in Phase 5, upload the five verified
 extracts built in Phase 0 (`local_test\output\dbextract\`) to a
 `dbextract` container — `dbextract/orders/orders.parquet` (~10 MB),
 `customers` (~7 MB), `order_items` (~6.5 MB), `order_payments` (~4 MB),
-`order_reviews` (~9 MB) — and swap the five copies' source dataset to
-`ds_adls_parquet_dbextract` per `adf/adf_pipeline_design.md`. Everything
-downstream is unchanged.
+`order_reviews` (~9 MB) — and swap `cp_pg_entity`'s source dataset to
+`ds_adls_parquet_dbextract` (`entity` = `@item().entity`) per
+`adf/adf_pipeline_design.md`. Everything downstream is unchanged.
 
 ## Phase 3 — Target DDL (15 min)
 
@@ -144,23 +144,30 @@ screenshot (`04_databricks_smoke.png`).
 ## Phase 5 — ADF pipeline (60–75 min)
 
 Laptop, Docker Desktop and the `qvc_sql_exercise` container must be
-running (the SHIR reads Postgres at `localhost:5432`). Follow
-`adf/adf_pipeline_design.md`:
+running (the SHIR reads Postgres at `localhost:5432`). The pipeline is
+**metadata-driven**: one config file lists all 9 entities; a Lookup + two
+Filters + two ForEach loops do the copying. Follow
+`adf/adf_pipeline_design.md` (it has every expression to type):
 
-1. 4 linked services (ADLS via managed identity — grant the factory
+1. Upload `adf/config/entities.json` to the `config` container as
+   `config/entities.json`.
+2. 4 linked services (ADLS via managed identity — grant the factory
    *Storage Blob Data Contributor* on the storage account; PostgreSQL via
    `shir-laptop` with **SSL mode: disable** and the Key Vault password;
    Key Vault — grant *Key Vault Secrets User*; Databricks).
-2. 4 parameterised datasets (plus the fallback `ds_adls_parquet_dbextract`
-   if you want it pre-staged).
-3. 9 Copy activities: 5 Postgres→parquet + 4 csv→csv (build `cp_orders`
-   and `cp_products` first, Debug both, then clone the remaining seven and
-   edit parameters).
-4. Notebook activity depending on all nine, passing `run_id` and
-   `raw_base_path`.
-5. **Debug run** end-to-end — the first full-9 cloud run. Safe: transforms
+3. 5 datasets: `ds_json_config`, `ds_pg_table(schema, table)`,
+   `ds_adls_parquet_raw(entity, run_id)`,
+   `ds_adls_csv_inbox(folder, file)`, `ds_adls_csv_raw(entity, run_id)`.
+4. Pipeline graph: `lkp_entities` (First row only OFF) → `flt_pg` /
+   `flt_csv` → `fe_pg` / `fe_csv` (items = `@activity('flt_…').output.Value`
+   — capital V) each containing one parameterised Copy → `nb_transform`
+   depending on both loops, passing `run_id` and `raw_base_path`.
+5. Debug small first: temporarily upload a 2-item `entities.json` (one
+   postgres + one csv row), Debug, fix expressions, then upload the full
+   9-item file.
+6. **Debug run** end-to-end — the first full-9 cloud run. Safe: transforms
    passed locally (Phase 0), the JDBC seam passed on real infrastructure
-   (Phase 4). If the Postgres copies fail here and the SHIR can't be
+   (Phase 4). If the postgres iterations fail and the SHIR can't be
    unblocked quickly, switch to the fallback (Phase 2c) and re-Debug.
 
 **Checkpoint 5:** Monitor fully green; per-copy rows visible
@@ -222,6 +229,10 @@ match `ENTITY_CONFIG` keys). Create only the containers — ADF creates the
 ```
 <storage account>  (hierarchical namespace ENABLED)
 │
+├── config/                       ← manual upload, once (drives the pipeline)
+│   └── entities.json             (from adf/config/entities.json — the
+│                                  Lookup reads it; 9 entity definitions)
+│
 ├── inbox/                        ← manual upload, once (file source)
 │   ├── products/olist_products_dataset.csv                        (~2.3 MB)
 │   ├── sellers/olist_sellers_dataset.csv                          (~0.2 MB)
@@ -265,7 +276,7 @@ evidence/
 ├── 02_sources_seeded.png       psql exact counts + inbox layout
 ├── 03_target_ddl.png           schemas/tables/views created
 ├── 04_databricks_smoke.png     71-row smoke load + process log row
-├── 05_adf_canvas.png           9 copies → notebook
+├── 05_adf_canvas.png           Lookup → Filters → ForEach ×2 → notebook
 ├── 06_monitor_green.png        per-copy row counts
 ├── 07_process_log.png          9 SUCCESS rows, ADF run GUID
 ├── 08_dq_distributions.png     flagged payments / scores / geo compression

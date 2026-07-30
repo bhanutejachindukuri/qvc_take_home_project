@@ -29,7 +29,8 @@ src.order_payments · src.order_reviews         · category translation (CSV)
         │  via Self-Hosted                            │
         │  Integration Runtime                        │
         └───────────► Azure Data Factory ◄────────────┘
-                9 parallel Copy activities
+        metadata-driven: Lookup(config/entities.json) →
+        Filter ×2 → ForEach ×2 → 9 parameterised copies per run
                           │
         ADLS Gen2 raw zone — raw/<entity>/run_id=<ADF RunId>/
         (typed parquet for the 5 relational entities, csv snapshots
@@ -82,7 +83,7 @@ Design principles carried over from the layered enterprise DWH pattern:
 | ADF Mapping Data Flows | Rejected: Spark-cluster spin-up cost/latency for renames+casts; logic buried in ADF JSON is hard to review |
 | T-SQL stored procedures (pure ELT in target) | Strong option, deliberately not chosen — demonstrates Spark-based transformation; sprocs would win if the target owned all compute |
 | dbt on the target | Best long-term home for transform logic (tests, lineage, docs); out of proportion for this scope — noted as the production evolution |
-| 2 parameterised ForEach loops instead of 9 explicit copies | Documented as the evolution at higher table counts; explicit copies chosen for Monitor observability (per-copy row counts) and a canvas that shows the whole flow |
+| 9 explicit hand-wired Copy activities | Rejected: fastest to author and the friendliest canvas, but every new table is a pipeline edit; the metadata-driven Lookup → Filter → ForEach design keeps the entity list as config (`adf/config/entities.json`) while Monitor still records per-iteration row counts |
 | Full 1M-row geolocation load to SQL | Rejected — see the judgement call below |
 
 ## Data model & transformations
@@ -223,7 +224,8 @@ Data Pipeline Exercise/
 │   ├── olist_transforms.ipynb        generated import-ready notebooks
 │   └── transform_olist.ipynb         (regenerate via local_test/make_notebooks.py)
 ├── adf/
-│   └── adf_pipeline_design.md        build notes; exported factory JSON lands here
+│   ├── adf_pipeline_design.md        build notes; exported factory JSON lands here
+│   └── config/entities.json          the metadata that drives the pipeline
 ├── postgres_source/
 │   └── postgres_seed.sql             src.* DDL + \copy loads (Docker Postgres)
 ├── local_test/

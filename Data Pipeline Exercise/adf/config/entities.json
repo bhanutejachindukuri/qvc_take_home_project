@@ -1,0 +1,11 @@
+[
+  { "entity": "orders",         "kind": "postgres", "schema": "src", "table": "orders" },
+  { "entity": "customers",      "kind": "postgres", "schema": "src", "table": "customers" },
+  { "entity": "order_items",    "kind": "postgres", "schema": "src", "table": "order_items" },
+  { "entity": "order_payments", "kind": "postgres", "schema": "src", "table": "order_payments" },
+  { "entity": "order_reviews",  "kind": "postgres", "schema": "src", "table": "order_reviews" },
+  { "entity": "products",       "kind": "csv", "folder": "products",    "file": "olist_products_dataset.csv" },
+  { "entity": "sellers",        "kind": "csv", "folder": "sellers",     "file": "olist_sellers_dataset.csv" },
+  { "entity": "geolocation",    "kind": "csv", "folder": "geolocation", "file": "olist_geolocation_dataset.csv" },
+  { "entity": "product_category_translation", "kind": "csv", "folder": "product_category_translation", "file": "product_category_name_translation.csv" }
+]
