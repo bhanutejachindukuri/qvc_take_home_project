@@ -36,21 +36,40 @@ region as the existing resources):
    `sql-db-name`, `sql-user`, `sql-password`,
    `pg-password` (= `qvc`, the Docker container's password),
    `storage-key` (storage account → Access keys → key1).
-2. Install the **Self-Hosted Integration Runtime** on this machine: ADF
+2. **Grant both consumers access to the vault** (needed before Phases 4–5;
+   do it now while you're here). Check the vault's permission model first
+   — Key Vault → *Access configuration* → shows either "Vault access
+   policy" or "Azure RBAC":
+   - **ADF** (used by the `ls_kv` linked service, Phase 5) — the factory's
+     own **system-assigned managed identity**. Access policies → Add →
+     search your Data Factory's name → *Get* + *List* on Secrets. RBAC
+     instead → assign **Key Vault Secrets User** to the factory.
+   - **Databricks** (used by the `kv-olist` secret scope, Phase 4) — an
+     Azure Key Vault-backed secret scope does **not** authenticate as your
+     workspace's identity. It authenticates as a Microsoft first-party
+     Azure AD application called **`AzureDatabricks`**, present in every
+     tenant that has a Databricks workspace. Access policies → Add →
+     search `AzureDatabricks` → *Get* + *List* on Secrets. RBAC instead →
+     assign **Key Vault Secrets User** to that same `AzureDatabricks`
+     principal. Skipping this is the single most common reason
+     `dbutils.secrets.get(...)` fails in Phase 4 with an authorization
+     error.
+3. Install the **Self-Hosted Integration Runtime** on this machine: ADF
    Studio → Manage → Integration runtimes → New → Self-Hosted (name it
    `shir-laptop`) → download the MSI, install, paste the registration key.
    Wait for status **Running**.
-3. Storage account: **verify hierarchical namespace is enabled**
+4. Storage account: **verify hierarchical namespace is enabled**
    (Overview → "Data Lake Storage" should say enabled; if not: Settings →
    Data Lake Gen2 upgrade). `abfss://` access requires it — this is the one
    silent blocker among the pre-created resources.
-4. Storage account: create containers `config`, `inbox`, `raw` (create
+5. Storage account: create containers `config`, `inbox`, `raw` (create
    `dbextract` too only if you end up on the fallback path, below).
-5. Azure SQL server → Networking: add your client IP; enable
+6. Azure SQL server → Networking: add your client IP; enable
    *Allow Azure services and resources to access this server*.
 
-**Checkpoint 1:** Key Vault shows 6 secrets; SHIR status Running; storage
-shows HNS enabled + containers; SQL firewall saved.
+**Checkpoint 1:** Key Vault shows 6 secrets + 2 access grants (factory
+identity, `AzureDatabricks`); SHIR status Running; storage shows HNS
+enabled + containers; SQL firewall saved.
 
 ## Phase 2 — Seed the two sources (30–40 min)
 
@@ -129,13 +148,16 @@ an empty result (not an error) → screenshot (`03_target_ddl.png`).
    generated from them by `local_test/make_notebooks.py` — regenerate
    rather than editing the `.ipynb` directly.
 4. Smoke test with the smallest entity: upload
-   `product_category_name_translation.csv` (again, from Downloads) to
-   `raw/product_category_translation/run_id=manual-smoke/` via storage
-   browser, then run `transform_olist` with widgets
+   `product_category_name_translation.csv` (again, from Downloads) directly
+   into `raw/csv/product_category_translation/` via storage browser (no
+   `run_id=` subfolder — csv entities are read as a whole folder, see the
+   ADLS appendix), then run `transform_olist` with widgets
    `run_id = manual-smoke`, `only_entity = product_category_translation`,
-   `raw_base_path = abfss://raw@<storageaccount>.dfs.core.windows.net`.
-   Expected friction lives here: secret scope names, storage auth, the
-   JDBC write (verify *Allow Azure services* if it times out).
+   `raw_base_path = abfss://olistdata@<storageaccount>.dfs.core.windows.net/raw`.
+   Expected friction lives here: the secret scope's Key Vault permission
+   (see Phase 1 step 2 — `AzureDatabricks` needs Get+List, not your own
+   account), storage auth, the JDBC write (verify *Allow Azure services*
+   if it times out).
 
 **Checkpoint 4:** `SELECT COUNT(*) FROM curated.product_category_translation`
 returns **71** and `etl.pipeline_process_log` has one SUCCESS row →
@@ -154,7 +176,8 @@ Filters + two ForEach loops do the copying. Follow
 2. 4 linked services (ADLS via managed identity — grant the factory
    *Storage Blob Data Contributor* on the storage account; PostgreSQL via
    `shir-laptop` with **SSL mode: disable** and the Key Vault password;
-   Key Vault — grant *Key Vault Secrets User*; Databricks).
+   Key Vault — its access grant was already done in Phase 1 step 2;
+   Databricks).
 3. 5 datasets: `ds_json_config`, `ds_pg_table(schema, table)`,
    `ds_adls_parquet_raw(entity, run_id)`,
    `ds_adls_csv_inbox(folder, file)`, `ds_adls_csv_raw(entity, run_id)`.
