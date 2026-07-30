@@ -212,6 +212,51 @@ the four pre-existing resources are yours to keep or remove.
 README rationale sections, or the Phase 0 harness evidence — those carry
 the scoring weight.
 
+## Appendix — ADLS folder structure (reference)
+
+Container and folder names are load-bearing: the ADF datasets and the
+notebook build paths from these exact lowercase strings (the entity names
+match `ENTITY_CONFIG` keys). Create only the containers — ADF creates the
+`raw` subfolders itself on the first run.
+
+```
+<storage account>  (hierarchical namespace ENABLED)
+│
+├── inbox/                        ← manual upload, once (file source)
+│   ├── products/olist_products_dataset.csv                        (~2.3 MB)
+│   ├── sellers/olist_sellers_dataset.csv                          (~0.2 MB)
+│   ├── geolocation/olist_geolocation_dataset.csv                  (~61 MB)
+│   └── product_category_translation/product_category_name_translation.csv
+│
+├── raw/                          ← written ONLY by ADF; starts EMPTY
+│   │                               (one run_id folder per entity per run —
+│   │                                that is the reproducibility feature)
+│   ├── orders/run_id=<ADF RunId>/                 *.parquet
+│   ├── customers/run_id=<ADF RunId>/              *.parquet
+│   ├── order_items/run_id=<ADF RunId>/            *.parquet
+│   ├── order_payments/run_id=<ADF RunId>/         *.parquet
+│   ├── order_reviews/run_id=<ADF RunId>/          *.parquet
+│   ├── products/run_id=<ADF RunId>/               *.csv (snapshot)
+│   ├── sellers/run_id=<ADF RunId>/                *.csv
+│   ├── geolocation/run_id=<ADF RunId>/            *.csv
+│   ├── product_category_translation/run_id=<ADF RunId>/  *.csv
+│   └── product_category_translation/run_id=manual-smoke/ ← Phase 4 only:
+│                                     upload the translation csv here by
+│                                     hand for the Databricks smoke test
+│
+└── dbextract/                    ← FALLBACK ONLY (Phase 2c; skip otherwise)
+    ├── orders/orders.parquet                    (~10 MB)
+    ├── customers/customers.parquet              (~7 MB)
+    ├── order_items/order_items.parquet          (~6.5 MB)
+    ├── order_payments/order_payments.parquet    (~4 MB)
+    └── order_reviews/order_reviews.parquet      (~9 MB)
+```
+
+The notebook reads `abfss://raw@<storageaccount>.dfs.core.windows.net/`
+(`raw` is the container in the URL) + `<entity>/run_id=<RUN_ID>/`. Old
+`run_id=` folders accumulate by design; production would apply lifecycle
+management (cool/archive) to them.
+
 ## Evidence file naming
 
 ```
