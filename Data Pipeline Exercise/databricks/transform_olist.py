@@ -38,15 +38,19 @@ RAW = dbutils.widgets.get("raw_base_path").rstrip("/")
 ONLY_ENTITY = dbutils.widgets.get("only_entity").strip()
 
 # COMMAND ----------
-# ADLS access — storage account key from the Key-Vault-backed secret scope.
-# (Exercise-grade auth; Unity Catalog external locations / a service
-# principal are the production answer — see README.)
+# ADLS access — storage account key from a Databricks-NATIVE secret scope
+# (`olist-secrets`, created via the CLI — see SETUP_GUIDE Phase 4). Not
+# Key-Vault-backed: this subscription doesn't allow granting Key Vault or
+# any other Azure RBAC role, so secrets live in Databricks' own store
+# instead. dbutils.secrets.get() is identical either way — only how the
+# scope was created differs. Exercise-grade either way; Unity Catalog
+# external locations / a service principal are the production answer.
 # The account name is parsed from raw_base_path: abfss://raw@<acct>.dfs...
 
 STORAGE_ACCOUNT = RAW.split("@")[1].split(".")[0]
 spark.conf.set(
     f"fs.azure.account.key.{STORAGE_ACCOUNT}.dfs.core.windows.net",
-    dbutils.secrets.get("kv-olist", "storage-key"),
+    dbutils.secrets.get("olist-secrets", "storage-key"),
 )
 
 # COMMAND ----------
@@ -56,12 +60,12 @@ JDBC_URL = (
     "jdbc:sqlserver://{server}.database.windows.net:1433;"
     "database={db};encrypt=true;trustServerCertificate=false;loginTimeout=30;"
 ).format(
-    server=dbutils.secrets.get("kv-olist", "sql-server-name"),
-    db=dbutils.secrets.get("kv-olist", "sql-db-name"),
+    server=dbutils.secrets.get("olist-secrets", "sql-server-name"),
+    db=dbutils.secrets.get("olist-secrets", "sql-db-name"),
 )
 JDBC_PROPS = {
-    "user": dbutils.secrets.get("kv-olist", "sql-user"),
-    "password": dbutils.secrets.get("kv-olist", "sql-password"),
+    "user": dbutils.secrets.get("olist-secrets", "sql-user"),
+    "password": dbutils.secrets.get("olist-secrets", "sql-password"),
     "driver": "com.microsoft.sqlserver.jdbc.SQLServerDriver",
 }
 

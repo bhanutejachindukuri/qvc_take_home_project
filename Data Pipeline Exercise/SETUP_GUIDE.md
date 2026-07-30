@@ -26,50 +26,42 @@ evidence pack (`evidence/`, naming convention at the end).
 (`01_local_harness.png`). The transforms are now proven before any cloud
 spend; the cloud phases only have to prove the *seams* (auth, copies, JDBC).
 
-## Phase 1 — Complete the infrastructure (30–45 min)
+## Phase 1 — Complete the infrastructure (20–30 min)
 
-One resource to create plus one agent to install (Key Vault in the same
-region as the existing resources):
+> **No Key Vault, no role assignments.** This subscription doesn't allow
+> granting Key Vault access or assigning ANY Azure role to ANY principal
+> (checked directly — Access policies, RBAC, and the factory's managed
+> identity are all blocked). So this design uses none of them: every
+> secret is a plain secure string typed directly into whatever needs it
+> (ADF encrypts linked-service secrets internally; Databricks gets a
+> **native**, non-Key-Vault secret scope in Phase 4). Nothing below
+> requires creating a Key Vault or assigning a role to anything — if you
+> already created one while troubleshooting, it's unused and safe to
+> ignore or delete.
 
-1. Create the **Azure Key Vault**; add 6 secrets:
-   `sql-server-name` (just the server name, no `.database.windows.net`),
-   `sql-db-name`, `sql-user`, `sql-password`,
-   `pg-password` (= `qvc`, the Docker container's password),
-   `storage-key` (storage account → Access keys → key1).
-2. **Grant both consumers access to the vault** (needed before Phases 4–5;
-   do it now while you're here). Check the vault's permission model first
-   — Key Vault → *Access configuration* → shows either "Vault access
-   policy" or "Azure RBAC":
-   - **ADF** (used by the `ls_kv` linked service, Phase 5) — the factory's
-     own **system-assigned managed identity**. Access policies → Add →
-     search your Data Factory's name → *Get* + *List* on Secrets. RBAC
-     instead → assign **Key Vault Secrets User** to the factory.
-   - **Databricks** (used by the `kv-olist` secret scope, Phase 4) — an
-     Azure Key Vault-backed secret scope does **not** authenticate as your
-     workspace's identity. It authenticates as a Microsoft first-party
-     Azure AD application called **`AzureDatabricks`**, present in every
-     tenant that has a Databricks workspace. Access policies → Add →
-     search `AzureDatabricks` → *Get* + *List* on Secrets. RBAC instead →
-     assign **Key Vault Secrets User** to that same `AzureDatabricks`
-     principal. Skipping this is the single most common reason
-     `dbutils.secrets.get(...)` fails in Phase 4 with an authorization
-     error.
-3. Install the **Self-Hosted Integration Runtime** on this machine: ADF
+One resource to create:
+
+1. Install the **Self-Hosted Integration Runtime** on this machine: ADF
    Studio → Manage → Integration runtimes → New → Self-Hosted (name it
    `shir-laptop`) → download the MSI, install, paste the registration key.
-   Wait for status **Running**.
-4. Storage account: **verify hierarchical namespace is enabled**
+   Wait for status **Running**. (No role assignment involved — the
+   registration key is a resource-scoped secret, not an IAM grant.)
+2. Storage account: **verify hierarchical namespace is enabled**
    (Overview → "Data Lake Storage" should say enabled; if not: Settings →
    Data Lake Gen2 upgrade). `abfss://` access requires it — this is the one
    silent blocker among the pre-created resources.
-5. Storage account: create containers `config`, `inbox`, `raw` (create
+3. Storage account: create containers `config`, `inbox`, `raw` (create
    `dbextract` too only if you end up on the fallback path, below).
-6. Azure SQL server → Networking: add your client IP; enable
+4. Storage account → **Access keys** → copy `key1`. You'll paste this same
+   value into two places: the `ls_adls` ADF linked service (Phase 5) and
+   the Databricks `storage-key` secret (Phase 4). Copying your own
+   account's key isn't a role assignment — it's a plain data-plane read on
+   a resource you already own, so this works regardless of the RBAC block.
+5. Azure SQL server → Networking: add your client IP; enable
    *Allow Azure services and resources to access this server*.
 
-**Checkpoint 1:** Key Vault shows 6 secrets + 2 access grants (factory
-identity, `AzureDatabricks`); SHIR status Running; storage shows HNS
-enabled + containers; SQL firewall saved.
+**Checkpoint 1:** SHIR status Running; storage shows HNS enabled +
+containers, key1 copied somewhere handy; SQL firewall saved.
 
 ## Phase 2 — Seed the two sources (30–40 min)
 
@@ -137,27 +129,44 @@ an empty result (not an error) → screenshot (`03_target_ddl.png`).
 
 1. Create a **single-node cluster**: smallest VM available, latest LTS
    runtime, **auto-terminate 15 min**.
-2. Create the Key-Vault-backed secret scope **`kv-olist`**: open
-   `https://<workspace-url>#secrets/createScope` (name `kv-olist`, vault
-   DNS + resource ID from the Key Vault's Properties page).
-3. Import BOTH notebooks into the same folder (Workspace → `/Shared` →
+2. Generate a **Databricks personal access token** (User Settings →
+   Developer → Access tokens → Generate new token). Save it somewhere
+   safe — you'll use it twice: once now for the CLI, and again in Phase 5
+   for the `ls_databricks` linked service. This is a pure Databricks-
+   workspace permission, unrelated to the Azure RBAC block.
+3. Install the Databricks CLI locally (`pip install databricks-cli`) and
+   configure it: `databricks configure --token` → paste your workspace URL
+   and the PAT from step 2.
+4. Create the **native** (non-Key-Vault) secret scope and its 5 secrets:
+   ```powershell
+   databricks secrets create-scope olist-secrets
+   databricks secrets put-secret olist-secrets sql-server-name --string-value "<server, no .database.windows.net>"
+   databricks secrets put-secret olist-secrets sql-db-name --string-value "<db name>"
+   databricks secrets put-secret olist-secrets sql-user --string-value "<admin user>"
+   databricks secrets put-secret olist-secrets sql-password --string-value "<admin password>"
+   databricks secrets put-secret olist-secrets storage-key --string-value "<key1 from Phase 1 step 4>"
+   ```
+   This is the direct swap for the old `#secrets/createScope` UI flow —
+   same `dbutils.secrets.get("olist-secrets", ...)` calls in the notebook,
+   just backed by Databricks' own store instead of Key Vault, so no Azure
+   role assignment is needed at all.
+5. Import BOTH notebooks into the same folder (Workspace → `/Shared` →
    Import): `databricks/olist_transforms.ipynb` and
    `databricks/transform_olist.ipynb` (the shell `%run`s
    `./olist_transforms`, so they must sit side by side). The `.py`
    sources import identically if you prefer; the `.ipynb` files are
    generated from them by `local_test/make_notebooks.py` — regenerate
    rather than editing the `.ipynb` directly.
-4. Smoke test with the smallest entity: upload
+6. Smoke test with the smallest entity: upload
    `product_category_name_translation.csv` (again, from Downloads) directly
    into `raw/csv/product_category_translation/` via storage browser (no
    `run_id=` subfolder — csv entities are read as a whole folder, see the
    ADLS appendix), then run `transform_olist` with widgets
    `run_id = manual-smoke`, `only_entity = product_category_translation`,
    `raw_base_path = abfss://olistdata@<storageaccount>.dfs.core.windows.net/raw`.
-   Expected friction lives here: the secret scope's Key Vault permission
-   (see Phase 1 step 2 — `AzureDatabricks` needs Get+List, not your own
-   account), storage auth, the JDBC write (verify *Allow Azure services*
-   if it times out).
+   Expected friction lives here: a secret name typo in step 4 (error names
+   the missing key), storage auth, the JDBC write (verify *Allow Azure
+   services* if it times out).
 
 **Checkpoint 4:** `SELECT COUNT(*) FROM curated.product_category_translation`
 returns **71** and `etl.pipeline_process_log` has one SUCCESS row →
@@ -173,11 +182,12 @@ Filters + two ForEach loops do the copying. Follow
 
 1. Upload `adf/config/entities.json` to the `config` container as
    `config/entities.json`.
-2. 4 linked services (ADLS via managed identity — grant the factory
-   *Storage Blob Data Contributor* on the storage account; PostgreSQL via
-   `shir-laptop` with **SSL mode: disable** and the Key Vault password;
-   Key Vault — its access grant was already done in Phase 1 step 2;
-   Databricks).
+2. 3 linked services, **all secret-based, no role assignments**
+   (`adf/adf_pipeline_design.md` has the exact fields): ADLS via
+   **Account key** (paste storage `key1` from Phase 1 step 4); PostgreSQL
+   via `shir-laptop`, password `qvc` entered directly, **SSL mode:
+   disable**; Databricks via **Access Token** (paste the PAT from Phase 4
+   step 2 — not Managed Service Identity).
 3. 5 datasets: `ds_json_config`, `ds_pg_table(schema, table)`,
    `ds_adls_parquet_raw(entity, run_id)`,
    `ds_adls_csv_inbox(folder, file)`, `ds_adls_csv_raw(entity, run_id)`.
@@ -218,11 +228,14 @@ tell what ran, where, and with what result.
 
 ## Phase 7 — Cost hygiene (5 min)
 
-Nothing new bills meaningfully: Key Vault is pennies, Azure SQL serverless
-auto-pauses, the Databricks cluster auto-terminates, storage holds ~200 MB,
-and the SHIR is free (uninstall the MSI whenever you like — the Docker
-Postgres is only reachable while your laptop runs anyway). Delete the Key
-Vault (and the containers' contents) if the account should go fully quiet;
+Nothing new bills meaningfully: Azure SQL serverless auto-pauses, the
+Databricks cluster auto-terminates, storage holds ~200 MB, and the SHIR is
+free (uninstall the MSI whenever you like — the Docker Postgres is only
+reachable while your laptop runs anyway). If you created a Key Vault while
+troubleshooting the RBAC block, it's unused — delete it any time. Also
+revoke the Databricks PAT (User Settings → Developer → Access tokens) once
+you're done, since it's a standing credential. Delete the containers'
+contents if the account should go fully quiet;
 the four pre-existing resources are yours to keep or remove.
 
 ---

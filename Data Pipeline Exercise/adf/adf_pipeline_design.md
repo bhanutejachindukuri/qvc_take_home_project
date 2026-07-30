@@ -25,6 +25,19 @@ implementation artifact.
 > container. The only change is `cp_pg_entity`'s source dataset:
 > `ds_pg_table` → `ds_adls_parquet_dbextract` with
 > `entity = @item().entity` — sink, raw layout and notebook are identical.
+>
+> **No Azure Key Vault, no role assignments:** this subscription does not
+> allow granting Key Vault access (policy or RBAC) or assigning ANY Azure
+> role to ANY principal — not the factory's managed identity, not the
+> `AzureDatabricks` app, nothing. So there is deliberately no `ls_kv`
+> linked service and no managed-identity auth anywhere in this design.
+> Every secret is entered as a plain **secure string** directly into the
+> consumer that needs it (ADF linked-service fields are encrypted at rest
+> by the factory itself; Databricks secrets live in a **Databricks-native**
+> secret scope, `olist-secrets`, created via CLI + PAT — see
+> `SETUP_GUIDE.md` Phase 4). Both mechanisms need zero Azure RBAC/Graph
+> permission. Production would use Key Vault + managed identity throughout
+> once the subscription allows it (see README).
 
 ## The config file (single source of truth)
 
@@ -62,12 +75,16 @@ apply to postgres rows, `folder`/`file` to csv rows.
 
 ## Linked services
 
+None of these need a role assignment — each authenticates with a secret
+typed directly into the linked service (Authentication method / type
+selector on each), which ADF encrypts internally. This is deliberate: see
+the "No Azure Key Vault, no role assignments" note above.
+
 | Name                | Type                         | Notes                                                                                                                                                                                                                                                |
 | ------------------- | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ls_adls`         | Azure Data Lake Storage Gen2 | Auth:**system-assigned managed identity** of the factory; grant it *Storage Blob Data Contributor* on the storage account                                                                                                                    |
-| `ls_postgres_src` | PostgreSQL (V2 connector)    | **connectVia: `shir-laptop`**; host `localhost`, port `5432`, database `olist`, user `qvc`, password from Key Vault (`pg-password`); **SSL mode: disable** (the local container runs without TLS — noted as exercise-grade) |
-| `ls_kv`           | Azure Key Vault              | Managed identity; grant the factory*Key Vault Secrets User*                                                                                                                                                                                        |
-| `ls_databricks`   | Azure Databricks             | Managed identity (grant the factory*Contributor* on the workspace) or PAT from Key Vault; cluster: **existing interactive cluster** (single node)                                                                                            |
+| `ls_adls`         | Azure Data Lake Storage Gen2 | **Authentication method: Account key**; storage account name + key1 (Storage account → Access keys) entered directly — the same key value used for the Databricks `storage-key` secret. No role assignment (reading your own account's key is not a role grant). |
+| `ls_postgres_src` | PostgreSQL (V2 connector)    | **connectVia: `shir-laptop`**; host `localhost`, port `5432`, database `olist`, user `qvc`, **password entered directly** (`qvc` — the Docker container's password) as a secure string; **SSL mode: disable** (the local container runs without TLS — noted as exercise-grade) |
+| `ls_databricks`   | Azure Databricks             | **Authentication type: Access Token** (not Managed Service Identity); paste a Databricks **personal access token** (same one generated for the CLI in SETUP_GUIDE Phase 4) directly as a secure string; cluster: **existing interactive cluster** (single node), referenced by its cluster ID |
 
 ## Datasets
 
@@ -197,5 +214,5 @@ run_id-scoped path.
 - The translation CSV carries a UTF-8 BOM; irrelevant to the copy (byte
   snapshot) and neutralized in Spark by the explicit-schema read.
 - Databricks → ADLS access: the notebook sets the storage account key from
-  the secret scope (`kv-olist/storage-key`); Unity Catalog external
+  the secret scope (`olist-secrets/storage-key`); Unity Catalog external
   locations are the production-grade answer.

@@ -74,7 +74,7 @@ Design principles carried over from the layered enterprise DWH pattern:
 | ADLS Gen2 | Landing zones (`inbox`, `raw`) | Decouples extraction from transformation; parquet as the typed intermediate |
 | Azure Databricks (PySpark) | Transformation | Set-based, testable transforms; config-driven entity pipeline + window-function dedup are natural in Spark; the pure-module split makes the logic locally testable |
 | Azure SQL Database (serverless) | Analytical target | Queryable SQL target required; auto-pause keeps cost near zero; Synapse dedicated pools disproportionate for ~570k curated rows |
-| Azure Key Vault | Secrets | Single source of truth, consumed by ADF linked services and the Databricks secret scope (`kv-olist`) |
+| Databricks-native secret scope (`olist-secrets`) | Secrets | Not Key Vault — this subscription blocks all Azure role assignments, including the ones Key Vault-backed scopes and managed-identity auth need. Secrets live in Databricks' own store (CLI + PAT) instead; ADF's secrets are typed directly into each linked service. See Assumptions & trade-offs |
 
 ### Alternatives considered
 
@@ -138,13 +138,14 @@ checkpoints. Short version:
 
 0. `python local_test/run_local_transforms.py` → 34/34 checks against the
    real files (also builds the fallback extracts).
-1. Create Key Vault (6 secrets) + install the SHIR; verify storage HNS;
-   create containers; SQL firewall.
+1. Install the SHIR; verify storage HNS; create containers; SQL firewall;
+   copy the storage account key (no Key Vault — see Assumptions).
 2. Seed sources: 5 `\copy` loads into Docker Postgres
    (`postgres_source/postgres_seed.sql`) + 4 CSVs to `inbox/`.
 3. Run `sql/01_azure_sql_ddl.sql` on Azure SQL.
-4. Import `databricks/*.ipynb` to `/Shared`; secret scope `kv-olist`;
-   71-row smoke run (`only_entity` widget).
+4. Import `databricks/*.ipynb` to `/Shared`; CLI-create the native secret
+   scope `olist-secrets` (5 secrets); 71-row smoke run (`only_entity`
+   widget).
 5. Build `pl_olist_ingest` per `adf/adf_pipeline_design.md`; Debug run.
 6. Evidence: `sql/02_evidence_queries.sql` + screenshots into `evidence/`.
 
@@ -171,10 +172,22 @@ checkpoints. Short version:
   should clear `raw/csv/<entity>/` first, or the sink should be fixed to
   add a `run_id` folder segment) are in `adf/adf_pipeline_design.md`
   ("Deviation actually observed") and `SETUP_GUIDE.md`'s ADLS appendix.
-- **Storage-key ADLS auth from Databricks** (via secret scope) for speed;
-  production answer is Unity Catalog external locations / service
-  principal. SSL disabled on the local Postgres link (container has no
-  TLS) — exercise-grade, called out in the ADF doc.
+- **No Azure Key Vault, no role assignments anywhere** — this subscription
+  blocks granting Key Vault access (policy or RBAC) and assigning any
+  Azure role to any principal, which also rules out managed-identity auth
+  for `ls_adls` and `ls_databricks`. Every secret is instead a secure
+  string typed directly where it's needed: ADF linked-service fields
+  (encrypted internally by the factory) for the storage account key and
+  Postgres password; a **Databricks-native** secret scope (`olist-secrets`,
+  created via CLI + personal access token, not Key Vault) for the storage
+  key and Azure SQL credentials the notebook reads. Functionally
+  equivalent for this exercise; production would use Key Vault + managed
+  identity throughout once the subscription allows the grants. Full detail
+  in `adf/adf_pipeline_design.md`'s "No Azure Key Vault" note.
+- **Storage-key ADLS auth from both ADF and Databricks** for the same
+  reason above; production answer is Unity Catalog external locations /
+  service principal. SSL disabled on the local Postgres link (container
+  has no TLS) — exercise-grade, called out in the ADF doc.
 - **Single-node smallest Databricks cluster, 15-min auto-terminate** —
   right-sized (~1.55M rows total); the transforms are partition-agnostic
   and scale to a multi-node cluster unchanged.
