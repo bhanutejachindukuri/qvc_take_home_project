@@ -151,7 +151,9 @@ checkpoints. Short version:
 2. Seed sources: 5 `\copy` loads into Docker Postgres
    (`postgres_source/postgres_seed.sql`) + 4 CSVs to `inbox/`.
 3. Run `sql/01_azure_sql_ddl.sql` on Azure SQL.
-4. Import `databricks/*.ipynb` to `/Shared`; CLI-create the native secret
+4. Import `databricks/*.ipynb` to a workspace folder (any folder — the
+   real build used a personal `/Users/...` folder, not `/Shared`);
+   CLI-create the native secret
    scope `olist-secrets` (5 secrets); 71-row smoke run (`only_entity`
    widget).
 5. Build `pl_olist_ingest` per `adf/adf_pipeline_design.md`; Debug run.
@@ -171,15 +173,18 @@ checkpoints. Short version:
 - **Failure isolation per entity** — one failing entity is logged FAILED
   in the process log, the other eight still load, and the run is failed at
   the end so Monitor shows red.
-- **Actual landed raw-zone layout deviates from the design** — the two ADF
-  sink datasets ended up parameterised inconsistently (csv: entity as a
-  folder, no run_id; parquet: entity+run_id baked into the file name, no
-  entity folder). The notebook's `read_raw()` was adapted to both shapes
-  as-built rather than requiring a pipeline rebuild — full detail and the
-  one real consequence (csv entities aren't run-id-scoped, so a second run
-  should clear `raw/csv/<entity>/` first, or the sink should be fixed to
-  add a `run_id` folder segment) are in `adf/adf_pipeline_design.md`
-  ("Deviation actually observed") and `SETUP_GUIDE.md`'s ADLS appendix.
+- **Actual landed raw-zone layout deviates from the original design** —
+  verified against the exported pipeline JSON
+  (`adf/pl_ol_ingest_onprem_to_adls.json`), not just inferred: csv sinks
+  use an entity-named folder with a RunId-named file inside
+  (`raw/csv/<entity>/<RunId>.txt`); parquet sinks are flat, with
+  entity+RunId concatenated into the file name instead of a folder
+  (`raw/parquet/<entity><RunId>`). Both are fully run-scoped despite the
+  shape difference. `read_raw()` reads the exact file for the current run
+  in both cases via a shared `find_run_file()` glob-by-prefix helper — no
+  risk of a second run double-counting a stale file. Full detail in
+  `adf/adf_pipeline_design.md` ("Fix applied: csv reads are now
+  run-scoped") and `SETUP_GUIDE.md`'s ADLS appendix.
 - **No Azure Key Vault, no role assignments anywhere** — this subscription
   blocks granting Key Vault access (policy or RBAC) and assigning any
   Azure role to any principal, which also rules out managed-identity auth

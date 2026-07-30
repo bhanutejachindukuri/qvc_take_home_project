@@ -1,14 +1,16 @@
-# ADF pipeline design — `pl_olist_ingest` (metadata-driven)
+# ADF pipeline design — `pl_ol_ingest_onprem_to_adls` (metadata-driven)
+
+> Verified against the actual exported pipeline JSON
+> (`adf/pl_ol_ingest_onprem_to_adls.json`) — activity names, dataset
+> parameters and the notebook path below are the real, as-built values,
+> not the originally planned ones. Differences from the original design
+> are called out explicitly where they matter.
 
 The pipeline is driven by ONE config file: `adf/config/entities.json`,
 uploaded to the storage container `config/`. A Lookup reads it, two Filter
 activities split it by source kind, and two ForEach loops run one
 parameterised Copy activity each. Adding a tenth entity later = one line
 of JSON + one Spark config entry — zero pipeline edits.
-
-Build this in ADF Studio, then export the JSON (Manage → ARM template, or
-connect the factory to a Git repo) and commit it under `adf/` as the
-implementation artifact.
 
 > **Relational-source note:** the five `postgres`-kind entities are copied
 > from a real PostgreSQL 16 — the SQL Exercise's local Docker container
@@ -22,22 +24,23 @@ implementation artifact.
 > **Verified fallback** (if the SHIR path is blocked): typed parquet
 > extracts of the same five tables, built by
 > `local_test/build_dbextract_parquet.py`, uploaded to a `dbextract`
-> container. The only change is `cp_pg_entity`'s source dataset:
-> `ds_pg_table` → `ds_adls_parquet_dbextract` with
+> container. The only change is `Copy_onprem_to_adls_raw`'s source
+> dataset: `ds_pg_table` → `ds_adls_parquet_dbextract` with
 > `entity = @item().entity` — sink, raw layout and notebook are identical.
 >
 > **No Azure Key Vault, no role assignments:** this subscription does not
 > allow granting Key Vault access (policy or RBAC) or assigning ANY Azure
 > role to ANY principal — not the factory's managed identity, not the
-> `AzureDatabricks` app, nothing. So there is deliberately no `ls_kv`
+> `AzureDatabricks` app, nothing. So there is deliberately no Key Vault
 > linked service and no managed-identity auth anywhere in this design.
 > Every secret is entered as a plain **secure string** directly into the
 > consumer that needs it (ADF linked-service fields are encrypted at rest
 > by the factory itself; Databricks secrets live in a **Databricks-native**
 > secret scope, `olist-secrets`, created via CLI + PAT — see
-> `SETUP_GUIDE.md` Phase 4). Both mechanisms need zero Azure RBAC/Graph
-> permission. Production would use Key Vault + managed identity throughout
-> once the subscription allows it (see README).
+> `SETUP_GUIDE.md` Phase 4; confirmed by `Ls_Data_bricks`'s Access Token
+> auth in the real export below). Both mechanisms need zero Azure
+> RBAC/Graph permission. Production would use Key Vault + managed identity
+> throughout once the subscription allows it (see README).
 
 ## The config file (single source of truth)
 
@@ -58,10 +61,10 @@ storage account:
 ]
 ```
 
-`entity` must match both the `raw/<entity>/` folder name and the
-`ENTITY_CONFIG` key in the Spark module — it is the join key of the whole
-system. `kind` decides which loop picks the row up; `schema`/`table`
-apply to postgres rows, `folder`/`file` to csv rows.
+`entity` must match both the raw-zone naming and the `ENTITY_CONFIG` key
+in the Spark module — it is the join key of the whole system. `kind`
+decides which loop picks the row up; `schema`/`table` apply to postgres
+rows, `folder`/`file` to csv rows.
 
 ## Integration runtimes
 
@@ -76,70 +79,80 @@ apply to postgres rows, `folder`/`file` to csv rows.
 ## Linked services
 
 None of these need a role assignment — each authenticates with a secret
-typed directly into the linked service (Authentication method / type
-selector on each), which ADF encrypts internally. This is deliberate: see
-the "No Azure Key Vault, no role assignments" note above.
+typed directly into the linked service, which ADF encrypts internally.
 
-| Name                | Type                         | Notes                                                                                                                                                                                                                                                |
-| ------------------- | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ls_adls`         | Azure Data Lake Storage Gen2 | **Authentication method: Account key**; storage account name + key1 (Storage account → Access keys) entered directly — the same key value used for the Databricks `storage-key` secret. No role assignment (reading your own account's key is not a role grant). |
-| `ls_postgres_src` | PostgreSQL (V2 connector)    | **connectVia: `shir-laptop`**; host `localhost`, port `5432`, database `olist`, user `qvc`, **password entered directly** (`qvc` — the Docker container's password) as a secure string; **SSL mode: disable** (the local container runs without TLS — noted as exercise-grade) |
-| `ls_databricks`   | Azure Databricks             | **Authentication type: Access Token** (not Managed Service Identity); paste a Databricks **personal access token** (same one generated for the CLI in SETUP_GUIDE Phase 4) directly as a secure string; cluster: **existing interactive cluster** (single node), referenced by its cluster ID |
+| Name | Type | Notes |
+|---|---|---|
+| `ls_adls` | Azure Data Lake Storage Gen2 | **Authentication method: Account key**; storage account `datasource4dbs`, key1 entered directly — the same key value used for the Databricks `storage-key` secret. No role assignment. |
+| `ls_postgres_src` | PostgreSQL (V2 connector) | **connectVia: `shir-laptop`**; host `localhost`, port `5432`, database `olist`, user `qvc`, password entered directly as a secure string; **SSL mode: disable**. |
+| `Ls_Data_bricks` | Azure Databricks | **Authentication type: Access Token** (confirmed — not Managed Service Identity); Databricks personal access token entered directly as a secure string; cluster: existing interactive cluster. |
 
 ## Datasets
 
-`run_id` is a dataset *parameter* (not `@pipeline().RunId` inside the
-dataset) because pipeline system variables are not available in dataset
-definitions — the Copy activities pass it in.
+Confirmed from the real pipeline export. Two datasets ended up doing
+double duty in ways the original design didn't anticipate — see the notes
+column.
 
-| Dataset                       | Type                                   | Parameters             | Path / config                                                                                                                    | Serves                                         |
-| ----------------------------- | -------------------------------------- | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
-| `ds_json_config`            | JSON (`ls_adls`)                     | —                     | container`config`, file `entities.json`                                                                                      | the Lookup                                     |
-| `ds_pg_table`               | PostgreSQL table (`ls_postgres_src`) | `schema`, `table`  | table =`@{dataset().schema}.@{dataset().table}`                                                                                | source of`cp_pg_entity`                      |
-| `ds_adls_parquet_raw`       | Parquet (`ls_adls`)                  | `entity`, `run_id` | *as designed:* container`raw`, folder `@{dataset().entity}/run_id=@{dataset().run_id}` — **as actually built here: container `olistdata`, static folder `raw/parquet`, `run_id`+`entity` went into the file name instead — see "Deviation" below*  | sink of`cp_pg_entity`                        |
-| `ds_adls_csv_inbox`         | DelimitedText (`ls_adls`)            | `folder`, `file`   | container`inbox`, folder `@{dataset().folder}`, file `@{dataset().file}`; header true; quote `"`; **escape `"`** — *as actually built: container `olistdata`, folder `inbox/@{dataset().folder}`* | source of`cp_csv_entity`                     |
-| `ds_adls_csv_raw`           | DelimitedText (`ls_adls`)            | `entity`, `run_id` | *as designed:* container`raw`, folder `@{dataset().entity}/run_id=@{dataset().run_id}` — **as actually built: container `olistdata`, folder `raw/csv/@{dataset().entity}`, no `run_id` in the path — see "Deviation" below**; header true; quote `"`; escape `"`              | sink of`cp_csv_entity`                       |
-| `ds_adls_parquet_dbextract` | Parquet (`ls_adls`)                  | `entity`             | container`dbextract`, folder `@{dataset().entity}`, file `@{dataset().entity}.parquet`                                     | **fallback** source for `cp_pg_entity` |
+| Dataset | Type | Real parameters | Path / config | Serves |
+|---|---|---|---|---|
+| `Ls_adls_json` | JSON (`ls_adls`) | — | `config/entities.json` | source of `Lookup_entity_config`. Named with an `Ls_` prefix despite being a **dataset**, not a linked service — a naming-convention quirk, not a functional issue. |
+| `ds_pg_table` | PostgreSQL table (`ls_postgres_src`) | `schema`, `table` | table = `@{dataset().schema}.@{dataset().table}` | source of `Copy_onprem_to_adls_raw` |
+| `ds_adls_parquet_raw` | Parquet (`ls_adls`) | `folder`, `file_name` (**not** `entity`/`run_id` as originally designed) | `folder` = `@concat('raw','/','parquet')` — a **static** value, same for every entity, no per-entity subfolder; `file_name` = `@concat(item().entity, pipeline().RunId)` — entity and RunId concatenated with no separator and no extension, computed at the Copy activity, not baked into the dataset itself | sink of `Copy_onprem_to_adls_raw`. Real path: `raw/parquet/<entity><RunId>` (e.g. `raw/parquet/orders083ead2f-75c9-4bf8-8a76-80da2c1bf691`) |
+| `ds_adls_csv_inbox` | DelimitedText (`ls_adls`) | `filesytem` (sic — real parameter name has this typo), `folder`, `file` | Reused for **both** source and sink of the same Copy — see below | source **and** sink of `Copy_Csv_to_raw` (the design originally planned a second dataset, `ds_adls_csv_raw`, for the sink; the real build reuses this one dataset with different parameter values instead) |
+| `ds_adls_parquet_dbextract` | Parquet (`ls_adls`) | `entity` | `dbextract/@{dataset().entity}/@{dataset().entity}.parquet` | **fallback** source for `Copy_onprem_to_adls_raw` — designed, not present in the current build (Postgres/SHIR path is live) |
 
-Escape char `"` (not the default `\`) preserves the RFC-4180
-doubled-quote style the Olist files use.
+**`ds_adls_csv_inbox`'s two roles, exact real values:**
 
-## Pipeline canvas
+| Role | `filesytem` | `folder` | `file` |
+|---|---|---|---|
+| Source (read from inbox) | `"olistdata"` (literal) | `@concat('inbox','/',item().folder)` | `@item().file` |
+| Sink (write to raw) | `"olistdata"` (literal) | `@concat('raw','/','csv','/',item().entity)` | `@pipeline().RunId` |
+
+The sink's format settings add `fileExtension: ".txt"` and
+`quoteAllText: true` — so the real landed path is
+**`raw/csv/<entity>/<RunId>.txt`**, a fully-quoted delimited file. This
+matters: it means the csv side **is** run-scoped after all (the filename
+is deterministically the RunId) — the notebook's `read_raw()` now reads
+that exact file rather than the whole entity folder (see "Fix applied"
+below); earlier design notes describing the csv side as unscoped were
+based on an incomplete read of the storage browser and have been
+corrected here against the real pipeline definition.
+
+## Pipeline canvas (real activity names)
 
 ```
-                     ┌─► [flt_pg]  ─► [fe_pg:  ⟳ cp_pg_entity ]  ─┐
-[lkp_entities] ──────┤                                            ├─► [nb_transform]
-                     └─► [flt_csv] ─► [fe_csv: ⟳ cp_csv_entity]  ─┘
+                                  ┌─► [Filter_postgresql] ─► [ForEachPostgreSql: ⟳ Copy_onprem_to_adls_raw] ─┐
+[Lookup_entity_config] ──────────┤                                                                            ├─► [Notebook_Transform_Load]
+                                  └─► [Filter_csv_src]     ─► [ForEachCsv:        ⟳ Copy_Csv_to_raw]        ─┘
 ```
 
-## Activities — exact settings
+## Activities — exact settings (as built)
 
-| Activity                                    | Setting                  | Value                                                                                                               |
-| ------------------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------- |
-| `lkp_entities` (Lookup)                   | Source dataset           | `ds_json_config`                                                                                                  |
-|                                             | **First row only** | **OFF** (returns the whole array)                                                                             |
-| `flt_pg` (Filter)                         | Items                    | `@activity('lkp_entities').output.value`                                                                          |
-|                                             | Condition                | `@equals(item().kind, 'postgres')`                                                                                |
-| `flt_csv` (Filter)                        | Items                    | `@activity('lkp_entities').output.value`                                                                          |
-|                                             | Condition                | `@equals(item().kind, 'csv')`                                                                                     |
-| `fe_pg` (ForEach)                         | Items                    | `@activity('flt_pg').output.Value`  ← capital **V**                                                        |
-|                                             | Sequential               | off (parallel); Batch count 5                                                                                       |
-| `cp_pg_entity` (Copy, inside `fe_pg`)   | Source dataset           | `ds_pg_table` — `schema` = `@item().schema`, `table` = `@item().table`                                   |
-|                                             | Sink dataset             | `ds_adls_parquet_raw` — `entity` = `@item().entity`, `run_id` = `@pipeline().RunId`                      |
-|                                             | Mapping                  | none — 1:1 structural copy (transform lives in Spark)                                                              |
-| `fe_csv` (ForEach)                        | Items                    | `@activity('flt_csv').output.Value`                                                                               |
-|                                             | Sequential               | off; Batch count 4                                                                                                  |
-| `cp_csv_entity` (Copy, inside `fe_csv`) | Source dataset           | `ds_adls_csv_inbox` — `folder` = `@item().folder`, `file` = `@item().file`                               |
-|                                             | Sink dataset             | `ds_adls_csv_raw` — `entity` = `@item().entity`, `run_id` = `@pipeline().RunId`                          |
-| `nb_transform` (Databricks Notebook)      | Depends on               | `fe_pg` success **AND** `fe_csv` success                                                                  |
-|                                             | Notebook path            | `/Shared/transform_olist` (`olist_transforms` imported alongside — the shell `%run`s `./olist_transforms`) |
-|                                             | Base parameters          | `run_id` = `@pipeline().RunId`; `raw_base_path` = `abfss://raw@<storageaccount>.dfs.core.windows.net` — *as actually built: `abfss://olistdata@<storageaccount>.dfs.core.windows.net/raw`*       |
+| Activity | Setting | Value |
+|---|---|---|
+| `Lookup_entity_config` (Lookup) | Source dataset | `Ls_adls_json` |
+| | **First row only** | **OFF** (`firstRowOnly: false` — returns the whole array) |
+| `Filter_postgresql` (Filter) | Items | `@activity('Lookup_entity_config').output.value` |
+| | Condition | `@equals(item().kind, 'postgres')` |
+| `Filter_csv_src` (Filter) | Items | `@activity('Lookup_entity_config').output.value` |
+| | Condition | `@equals(item().kind, 'csv')` |
+| `ForEachPostgreSql` (ForEach) | Items | `@activity('Filter_postgresql').output.value` — **lowercase `value`, confirmed working** (see Gotchas) |
+| | Sequential | `false` (parallel) |
+| `Copy_onprem_to_adls_raw` (Copy, inside `ForEachPostgreSql`) | Source | `ds_pg_table` — `schema` = `@item().schema`, `table` = `@item().table` (`PostgreSqlV2Source`) |
+| | Sink | `ds_adls_parquet_raw` — `folder` = `@concat('raw','/','parquet')`, `file_name` = `@concat(item().entity,pipeline().RunId)` (`ParquetSink`) |
+| | Mapping | No explicit column mapping — `TabularTranslator` with `typeConversion: true` still applies ADF's automatic relational→Parquet type mapping, which is unavoidable moving from a typed relational source into a typed columnar sink; this is not a hand-authored mapping |
+| `ForEachCsv` (ForEach) | Items | `@activity('Filter_csv_src').output.value` |
+| `Copy_Csv_to_raw` (Copy, inside `ForEachCsv`) | Source | `ds_adls_csv_inbox` — `filesytem` = `olistdata`, `folder` = `@concat('inbox','/',item().folder)`, `file` = `@item().file` (`DelimitedTextSource`) |
+| | Sink | `ds_adls_csv_inbox` (same dataset, reused) — `filesytem` = `olistdata`, `folder` = `@concat('raw','/','csv','/',item().entity)`, `file` = `@pipeline().RunId`; format: `quoteAllText: true`, `fileExtension: ".txt"` (`DelimitedTextSink`) |
+| `Notebook_Transform_Load` (Databricks Notebook) | Depends on | `ForEachPostgreSql` success **AND** `ForEachCsv` success |
+| | Linked service | `Ls_Data_bricks` |
+| | Notebook path | `/Users/bhanutejachindukuri@gmail.com/Qvc_data_engineer_problem/transform_olist` — a personal workspace folder, not `/Shared/`; `olist_transforms` must be imported into that **same** folder (the shell `%run`s `./olist_transforms`, a relative path) |
+| | Base parameters | `run_id` = `@pipeline().RunId` (expression); `raw_base_path` = `abfss://olistdata@datasource4dbs.dfs.core.windows.net/raw` (plain string). **No `only_entity` parameter** — confirmed absent, correct for a full 9-entity run. |
 
 Build tip: before wiring the full graph, Debug once with a temporary
-2-item `entities.json` (one postgres row + one csv row — e.g. customers +
-product_category_translation) to shake out expressions cheaply, then
-upload the full 9-item file. Expression typos inside ForEach fail only at
-runtime, so debug small.
+2-item `entities.json` (one postgres row + one csv row) to shake out
+expressions cheaply, then upload the full 9-item file. Expression typos
+inside ForEach fail only at runtime, so debug small.
 
 ## Trigger
 
@@ -156,45 +169,36 @@ as the production choice in the README.
 - **Trade-off:** the canvas shows the *pattern*, not nine named boxes, and
   inner-activity runs must be found in Monitor's activity list rather than
   on the canvas. Monitor still records **one Copy run per iteration with
-  full row counts** — click a `cp_pg_entity` run and its input shows which
-  entity it processed. Evidence stays intact.
+  full row counts** — click a `Copy_onprem_to_adls_raw` run and its input
+  shows which entity it processed. Evidence stays intact.
 - **Alternative rejected:** nine hand-wired Copy activities — fastest to
   author and the friendliest canvas screenshot, but every new table is a
   pipeline edit, and nine near-identical activities is repetition the
   config file exists to remove.
 
-## Deviation actually observed in this build
+## Fix applied: csv reads are now run-scoped
 
-The build in this project used a single `olistdata` container (folder
-`raw/` inside it, rather than a separate `raw` container) — fine, purely
-cosmetic. Less fine: the two sink datasets ended up parameterised
-**inconsistently**. `ds_adls_csv_raw`'s Directory correctly includes
-`@{dataset().entity}` (→ `raw/csv/<entity>/`), but its file name was left
-to ADF's auto-generated default with no `run_id` anywhere in the path.
-`ds_adls_parquet_raw` went the other way — its Directory is a **static**
-`raw/parquet` with `@{dataset().entity}` and `@{dataset().run_id}`
-concatenated into the **file name** field instead
-(`orders083ead2f-75c9-4bf8-8a76-80da2c1bf691`, no extension), so every
-entity's parquet lands flat in the same folder.
-
-The notebook (`read_raw()` in `transform_olist.py`) was adapted to read
-both shapes as-built — see the "as actually built" tree in
-`SETUP_GUIDE.md`'s ADLS appendix — rather than requiring a pipeline
-rebuild. Net effect: the parquet side is still run-scoped (RunId is in
-the filename) but the csv side is **not** — a second run risks doubling
-csv-sourced entity rows unless the folder is cleared first. **Durable
-fix**, if there's time before a second run: edit `ds_adls_csv_raw`'s
-Directory to `raw/csv/@{dataset().entity}/run_id=@{dataset().run_id}`
-(add a `run_id` dataset parameter, wire `cp_csv_entity`'s sink to pass
-`run_id = @pipeline().RunId`, matching how `ds_adls_parquet_raw` was
-*supposed* to work), then update `read_raw`'s csv branch back to a
-run_id-scoped path.
+Earlier notes (based on the storage browser alone) described the csv
+side as not run-scoped, risking double-counted rows on a second run. The
+real pipeline JSON shows this isn't actually true: the csv sink's `file`
+parameter is `@pipeline().RunId` — deterministic, just like the parquet
+side's filename. `read_raw()` in `transform_olist.py` now reads the exact
+file `raw/csv/<entity>/<RunId>.txt` (glob-matched by RunId prefix, same
+robustness pattern as the parquet branch) instead of the whole entity
+folder, so a second run reading a different RunId's file can no longer
+double-count. One consequence: the Phase 4 smoke-test upload must now be
+**named to match the `run_id` widget value** — see `SETUP_GUIDE.md`.
 
 ## Gotchas encountered / to expect
 
-- Filter output is referenced as `.output.Value` with a **capital V** —
-  lowercase `.value` works for Lookup but not Filter; this is the classic
-  silent-empty-loop mistake.
+- **Correction from earlier guidance:** the real, executed pipeline uses
+  lowercase `.output.value` to reference **both** Lookup's and Filter's
+  output — not `.output.Value` with a capital V as earlier notes here
+  claimed. The Debug/Monitor output pane displays Filter's result fields
+  capitalized (`ItemsCount` / `FilteredItemsCount` / `Value`) for
+  readability, but that's a display convention, not what the expression
+  needs — `.output.value` (lowercase) is what the working pipeline
+  actually uses. Trust this over the capital-V claim if the two conflict.
 - Lookup **First row only** must be OFF or the ForEach receives a single
   object and iterates its properties.
 - ADF forbids ForEach-inside-ForEach; the Filter + two-loop shape is the

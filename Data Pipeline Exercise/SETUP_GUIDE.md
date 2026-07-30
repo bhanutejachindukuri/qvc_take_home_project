@@ -140,8 +140,7 @@ an empty result (not an error) → screenshot (`03_target_ddl.png`).
 4. Create the **native** (non-Key-Vault) secret scope and its 5 secrets.
    The CLI defaults to making the creating user the scope's sole admin,
    which needs Premium tier; on a **Standard tier** workspace that's
-   rejected (`BAD_REQUEST: Premium Tier is disabled ... initial_manage_principal
-   "users"`) — pass `--initial-manage-principal users` explicitly, which
+   rejected (`BAD_REQUEST: Premium Tier is disabled ... initial_manage_principal "users"`) — pass `--initial-manage-principal users` explicitly, which
    Standard tier does allow (it grants MANAGE to every workspace user; on
    a single-user workspace that's no different in practice):
    ```powershell
@@ -153,6 +152,7 @@ an empty result (not an error) → screenshot (`03_target_ddl.png`).
    databricks secrets put --scope olist-secrets --key storage-key --string-value "<key1 from Phase 1 step 4>"
    databricks secrets list --scope olist-secrets    # verify: lists key names, never values
    ```
+
    (Flags shown are for the **legacy** `databricks-cli` PyPI package —
    `pip install databricks-cli` installs this one, hence the deprecation
    warning it prints; that's expected and harmless for this exercise. The
@@ -164,19 +164,25 @@ an empty result (not an error) → screenshot (`03_target_ddl.png`).
    `dbutils.secrets.get("olist-secrets", ...)` calls in the notebook, just
    backed by Databricks' own store instead of Key Vault, so no Azure role
    assignment is needed at all.
-5. Import BOTH notebooks into the same folder (Workspace → `/Shared` →
-   Import): `databricks/olist_transforms.ipynb` and
+5. Import BOTH notebooks into the **same** workspace folder — any folder
+   works (a personal `/Users/<you>/...` folder is fine, doesn't have to be
+   `/Shared`): `databricks/olist_transforms.ipynb` and
    `databricks/transform_olist.ipynb` (the shell `%run`s
-   `./olist_transforms`, so they must sit side by side). The `.py`
-   sources import identically if you prefer; the `.ipynb` files are
-   generated from them by `local_test/make_notebooks.py` — regenerate
-   rather than editing the `.ipynb` directly.
-6. Smoke test with the smallest entity: upload
-   `product_category_name_translation.csv` (again, from Downloads) directly
-   into `raw/csv/product_category_translation/` via storage browser (no
-   `run_id=` subfolder — csv entities are read as a whole folder, see the
-   ADLS appendix), then run `transform_olist` with widgets
-   `run_id = manual-smoke`, `only_entity = product_category_translation`,
+   `./olist_transforms`, a relative path, so they must sit side by side).
+   The `.py` sources import identically if you prefer; the `.ipynb` files
+   are generated from them by `local_test/make_notebooks.py` — regenerate
+   rather than editing the `.ipynb` directly. Note the exact path you used
+   (e.g. `/Users/you@example.com/transform_olist`) — you'll need it for
+   the ADF Notebook activity's Notebook path field in Phase 5.
+6. Smoke test with the smallest entity: reads are exact-file, RunId-scoped
+   (see `adf/adf_pipeline_design.md` "Fix applied"), so the uploaded file
+   must be **named to match the `run_id` widget value** — upload
+   `product_category_name_translation.csv` (from Downloads) into
+   `raw/csv/product_category_translation/` via storage browser, renamed to
+   `manual-smoke.txt` (extension doesn't matter, only the name prefix
+   does). Then run `transform_olist` with widgets `run_id = manual-smoke`,
+   `only_entity = product_category_translation` (bare word, no quotes —
+   an empty widget must be truly empty, not `''`),
    `raw_base_path = abfss://olistdata@<storageaccount>.dfs.core.windows.net/raw`.
    Expected friction lives here: a secret name typo in step 4 (error names
    the missing key), storage auth, the JDBC write (verify *Allow Azure
@@ -286,54 +292,44 @@ match `ENTITY_CONFIG` keys).
 └── dbextract/ <entity>/<entity>.parquet             (fallback only)
 ```
 
-### As actually built in this run (single `olistdata` container)
+### As actually built (single `olistdata` container) — verified against the exported pipeline JSON
 
-The real build in this project put everything in one container
-(`olistdata`) with `raw` as a folder, and the two ADF loops ended up
-landing data in **different shapes** — the notebook's `read_raw()` handles
-both explicitly:
+The real build put everything in one container (`olistdata`) with `raw`
+as a folder, and the two ADF loops land data in **different shapes** —
+confirmed against `adf/pl_ol_ingest_onprem_to_adls.json` (the exported
+pipeline definition), not just inferred from the storage browser:
 
 ```
 olistdata/                        (container; HNS enabled)
 ├── raw/
-│   ├── csv/                      ← ForEach_csv sink: entity as FOLDER
-│   │   ├── products/<ADF-generated file>
-│   │   ├── sellers/<ADF-generated file>
-│   │   ├── geolocation/<ADF-generated file>
-│   │   └── product_category_translation/<ADF-generated file>
+│   ├── csv/                      ← Copy_Csv_to_raw sink: entity as FOLDER
+│   │   ├── products/<RunId>.txt
+│   │   ├── sellers/<RunId>.txt
+│   │   ├── geolocation/<RunId>.txt
+│   │   └── product_category_translation/<RunId>.txt
 │   │
-│   └── parquet/                  ← ForEach_postgresql sink: FLAT —
-│       ├── orders<RunId>              entity+RunId ended up baked into
-│       ├── customers<RunId>           the FILE NAME instead of a folder
-│       ├── order_items<RunId>         (no entity subfolder, no extension
-│       ├── order_payments<RunId>      visible in the storage browser)
-│       └── order_reviews<RunId>
+│   └── parquet/                  ← Copy_onprem_to_adls_raw sink: FLAT —
+│       ├── orders<RunId>              entity+RunId concatenated into the
+│       ├── customers<RunId>           FILE NAME instead of a folder (no
+│       ├── order_items<RunId>         entity subfolder, no extension —
+│       ├── order_payments<RunId>      confirmed from the dataset's real
+│       └── order_reviews<RunId>       file_name expression)
 ```
 
-**Read contract that matches this** (`transform_olist.py::read_raw`):
-csv entities read the whole `raw/csv/<entity>/` folder (run_id is NOT
-part of the csv path — see the rerun caveat below); parquet entities read
-the exact file `raw/parquet/<entity><RUN_ID>` (glob-matched, since
-`RUN_ID` is literally `@pipeline().RunId` and is what's embedded in the
-filename — so it IS still run-scoped, just via filename instead of a
-folder). `raw_base_path` widget = `abfss://olistdata@<storageaccount>.dfs.core.windows.net/raw`.
+Both shapes are fully run-scoped: the csv sink's file is named exactly
+`@pipeline().RunId` with `.txt` appended (its `fileExtension` setting),
+and the parquet sink's file name is `@concat(item().entity,
+pipeline().RunId)`. `transform_olist.py::read_raw()` reads the **exact
+file** for the current run in both cases (via the shared `find_run_file()`
+helper, which globs by RunId prefix rather than hardcoding an extension) —
+not the whole folder, so old files from a previous run are never
+accidentally included. `raw_base_path` widget =
+`abfss://olistdata@<storageaccount>.dfs.core.windows.net/raw`.
 
-**Known limitation — flag, don't hide:** because csv reads glob the whole
-entity folder with no run_id filter, if ADF's csv sink auto-generates a
-new uniquely-named file on every run without clearing the old one, a
-SECOND run would accumulate two files in e.g. `raw/csv/products/` and the
-notebook would silently read both (double-counting products). This has
-not caused an issue yet because only one run has happened. **Before a
-second full run**, either (a) clear each `raw/csv/<entity>/` folder
-first, or (b) fix `ds_adls_csv_raw`'s Directory to include
-`run_id=@{dataset().run_id}` as a real folder segment (restores full
-run-scoping) and update `read_raw` to filter on it again. The parquet
-side does not have this problem — its filename already embeds `RUN_ID`
-uniquely per run.
-
-**Phase 4 smoke test, adjusted for this layout:** drop the translation
-CSV straight into `raw/csv/product_category_translation/` — no run_id
-subfolder needed for csv entities.
+**Phase 4 smoke test, adjusted for this layout:** the uploaded file must
+be **named to match your `run_id` widget value** (e.g. `manual-smoke.txt`
+if `run_id = manual-smoke`) and land inside
+`raw/csv/product_category_translation/` — see Phase 4 step 6.
 
 ### `dbextract/` (fallback only — Phase 2c; skip otherwise)
 

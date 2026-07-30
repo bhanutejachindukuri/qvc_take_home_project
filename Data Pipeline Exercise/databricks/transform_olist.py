@@ -1,17 +1,21 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC # Olist transform notebook (raw → curated)
-# MAGIC Reads the raw files landed by ADF in ADLS — csv reference files under
-# MAGIC `<raw base>/csv/<entity>/`, Postgres-sourced parquet flat under
-# MAGIC `<raw base>/parquet/` named `<entity><RunId>` (see `read_raw` below for
-# MAGIC why the two shapes differ) — applies the transformations defined in
-# MAGIC `olist_transforms` (rename / cast / null handling / dedup / DQ flags /
-# MAGIC ingestion metadata), writes typed tables to Azure SQL via JDBC, and logs
-# MAGIC per-entity row counts to `etl.pipeline_process_log`.
+# MAGIC Reads the raw files landed by ADF in ADLS — csv reference files at
+# MAGIC `<raw base>/csv/<entity>/<RunId>.txt`, Postgres-sourced parquet flat at
+# MAGIC `<raw base>/parquet/<entity><RunId>` (see `find_run_file`/`read_raw`
+# MAGIC below for why the two shapes differ — both are exact, run-scoped file
+# MAGIC reads, confirmed against the real exported pipeline JSON) — applies the
+# MAGIC transformations defined in `olist_transforms` (rename / cast / null
+# MAGIC handling / dedup / DQ flags / ingestion metadata), writes typed tables
+# MAGIC to Azure SQL via JDBC, and logs per-entity row counts to
+# MAGIC `etl.pipeline_process_log`.
 # MAGIC
 # MAGIC Parameters are passed by the ADF Notebook activity via widgets.
-# MAGIC Import BOTH files into the same workspace folder (e.g. `/Shared/`):
-# MAGIC this notebook `%run`s `./olist_transforms`.
+# MAGIC Import BOTH files into the same workspace folder: this notebook
+# MAGIC `%run`s `./olist_transforms`, a relative path, so they must sit
+# MAGIC side by side (any folder works — e.g. a personal `/Users/...` folder,
+# MAGIC not necessarily `/Shared/`).
 
 # COMMAND ----------
 
@@ -25,9 +29,12 @@ from pyspark.sql import types as T
 # Parameters (supplied by ADF: @pipeline().RunId and the raw folder path).
 # `only_entity` is a debug aid for the interactive smoke test: set it to a
 # single entity name (e.g. product_category_translation) to process just
-# that one; leave empty for the full 9-entity run. For a manual csv smoke
-# test, just drop a file straight into raw/csv/<entity>/ — no run_id
-# subfolder needed, see read_raw().
+# that one; leave empty (not '' — a truly empty widget) for the full
+# 9-entity run. For a manual csv smoke test: reads are exact-file, RunId-
+# scoped, so the uploaded file must be NAMED to match the run_id widget
+# value, e.g. widget run_id=manual-smoke -> upload as
+# raw/csv/<entity>/manual-smoke.txt (extension doesn't matter, only the
+# name prefix does — see find_run_file()).
 
 dbutils.widgets.text("run_id", "manual-local-run")
 dbutils.widgets.text("raw_base_path", "abfss://olistdata@<storageaccount>.dfs.core.windows.net/raw")
@@ -150,33 +157,42 @@ if ONLY_ENTITY and ONLY_ENTITY not in _VALID_ENTITIES:
 # COMMAND ----------
 
 
-def read_raw(entity: str, cfg: dict) -> DataFrame:
-    # The two ADF loops land data in DIFFERENT shapes (confirmed against
-    # the actual storage browser output, not the originally designed
-    # per-entity/run_id-folder layout for both — see README "Actual ADLS
-    # layout" note):
-    #   csv (inbox-sourced):   <raw>/csv/<entity>/<whatever ADF named it>
-    #                          — a normal folder; read the whole directory.
-    #   parquet (Postgres-sourced): <raw>/parquet/<entity><RunId>[.ext]
-    #                          — FLAT, no entity folder; the sink's file-name
-    #                          expression baked entity+RunId together instead
-    #                          of using them as folder segments. RUN_ID here
-    #                          is exactly ADF's @pipeline().RunId, so the
-    #                          current run's file is deterministically
-    #                          "<entity><RUN_ID>" (extension uncertain from
-    #                          the storage browser view, hence the glob).
-    if cfg["source_kind"] == "csv":
-        path = f"{RAW}/csv/{entity}/"
-        return spark.read.schema(cfg["csv_schema"]).option("header", "true").csv(path)
+def find_run_file(folder: str, prefix: str) -> str:
+    """Return the single file under `folder` whose name starts with `prefix`.
 
-    prefix = f"{entity}{RUN_ID}"
-    matches = [f.path for f in dbutils.fs.ls(f"{RAW}/parquet/") if f.name.startswith(prefix)]
+    Both ADF sink datasets end up writing exactly one deterministically-
+    named file per run (confirmed against the exported pipeline JSON,
+    adf/pl_ol_ingest_onprem_to_adls.json): the Postgres-sourced parquet
+    sink's file_name is @concat(item().entity, pipeline().RunId), and the
+    csv sink's file is @pipeline().RunId (with .txt appended by its format
+    settings). Either way, this run's file starts with the exact value of
+    RUN_ID — glob rather than hardcode the extension since ADF's format
+    settings could change it.
+    """
+    matches = [f.path for f in dbutils.fs.ls(folder) if f.name.startswith(prefix)]
     if len(matches) != 1:
         raise Exception(
-            f"{entity}: expected exactly 1 file starting with '{prefix}' under "
-            f"{RAW}/parquet/, found {len(matches)}: {matches}. If ADF's sink "
-            f"naming changed, update read_raw() in transform_olist.py.")
-    return spark.read.parquet(matches[0])
+            f"expected exactly 1 file starting with '{prefix}' under {folder}, "
+            f"found {len(matches)}: {matches}. If ADF's sink naming changed, "
+            f"update find_run_file()/read_raw() in transform_olist.py.")
+    return matches[0]
+
+
+def read_raw(entity: str, cfg: dict) -> DataFrame:
+    # The two ADF loops land data in DIFFERENT shapes:
+    #   csv (inbox-sourced):        raw/csv/<entity>/<RunId>.txt
+    #   parquet (Postgres-sourced): raw/parquet/<entity><RunId>  (flat, no
+    #                               entity subfolder — entity+RunId are
+    #                               concatenated into the file name instead)
+    # Both are exact-file reads scoped to the current run, not directory
+    # reads, so a second run can never double-count a stale file left over
+    # from an earlier one.
+    if cfg["source_kind"] == "csv":
+        file_path = find_run_file(f"{RAW}/csv/{entity}/", RUN_ID)
+        return spark.read.schema(cfg["csv_schema"]).option("header", "true").csv(file_path)
+
+    file_path = find_run_file(f"{RAW}/parquet/", f"{entity}{RUN_ID}")
+    return spark.read.parquet(file_path)
 
 
 failures = []
@@ -216,10 +232,11 @@ for entity, cfg in ENTITY_CONFIG.items():
 if not ONLY_ENTITY or ONLY_ENTITY == "geolocation":
     t0 = datetime.now(timezone.utc)
     try:
+        geo_file = find_run_file(f"{RAW}/csv/geolocation/", RUN_ID)
         geo_raw = (
             spark.read.schema(GEOLOCATION_SCHEMA)
             .option("header", "true")
-            .csv(f"{RAW}/csv/geolocation/")
+            .csv(geo_file)
         )
         n_read = geo_raw.count()
         geo_dim = aggregate_geolocation(geo_raw, RUN_ID)
