@@ -22,7 +22,7 @@ evidence pack (`evidence/`, naming convention at the end).
    multiline reviews parse — asserted at exactly 99,224 records) and runs
    all nine entity transforms against the full real dataset.
 
-**Checkpoint 0:** `34/34 checks passed` → screenshot
+**Checkpoint 0:** `34/34 checks passe` → screenshot
 (`01_local_harness.png`). The transforms are now proven before any cloud
 spend; the cloud phases only have to prove the *seams* (auth, copies, JDBC).
 
@@ -143,6 +143,7 @@ an empty result (not an error) → screenshot (`03_target_ddl.png`).
    rejected (`BAD_REQUEST: Premium Tier is disabled ... initial_manage_principal "users"`) — pass `--initial-manage-principal users` explicitly, which
    Standard tier does allow (it grants MANAGE to every workspace user; on
    a single-user workspace that's no different in practice):
+
    ```powershell
    databricks secrets create-scope --scope olist-secrets --initial-manage-principal users
    databricks secrets put --scope olist-secrets --key sql-server-name --string-value "<server, no .database.windows.net>"
@@ -318,8 +319,7 @@ olistdata/                        (container; HNS enabled)
 
 Both shapes are fully run-scoped: the csv sink's file is named exactly
 `@pipeline().RunId` with `.txt` appended (its `fileExtension` setting),
-and the parquet sink's file name is `@concat(item().entity,
-pipeline().RunId)`. `transform_olist.py::read_raw()` reads the **exact
+and the parquet sink's file name is `@concat(item().entity, pipeline().RunId)`. `transform_olist.py::read_raw()` reads the **exact
 file** for the current run in both cases (via the shared `find_run_file()`
 helper, which globs by RunId prefix rather than hardcoding an extension) —
 not the whole folder, so old files from a previous run are never
