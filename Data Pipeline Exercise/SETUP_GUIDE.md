@@ -139,17 +139,25 @@ an empty result (not an error) → screenshot (`03_target_ddl.png`).
    and the PAT from step 2.
 4. Create the **native** (non-Key-Vault) secret scope and its 5 secrets:
    ```powershell
-   databricks secrets create-scope olist-secrets
-   databricks secrets put-secret olist-secrets sql-server-name --string-value "<server, no .database.windows.net>"
-   databricks secrets put-secret olist-secrets sql-db-name --string-value "<db name>"
-   databricks secrets put-secret olist-secrets sql-user --string-value "<admin user>"
-   databricks secrets put-secret olist-secrets sql-password --string-value "<admin password>"
-   databricks secrets put-secret olist-secrets storage-key --string-value "<key1 from Phase 1 step 4>"
+   databricks secrets create-scope --scope olist-secrets
+   databricks secrets put --scope olist-secrets --key sql-server-name --string-value "<server, no .database.windows.net>"
+   databricks secrets put --scope olist-secrets --key sql-db-name --string-value "<db name>"
+   databricks secrets put --scope olist-secrets --key sql-user --string-value "<admin user>"
+   databricks secrets put --scope olist-secrets --key sql-password --string-value "<admin password>"
+   databricks secrets put --scope olist-secrets --key storage-key --string-value "<key1 from Phase 1 step 4>"
+   databricks secrets list --scope olist-secrets    # verify: lists key names, never values
    ```
-   This is the direct swap for the old `#secrets/createScope` UI flow —
-   same `dbutils.secrets.get("olist-secrets", ...)` calls in the notebook,
-   just backed by Databricks' own store instead of Key Vault, so no Azure
-   role assignment is needed at all.
+   (Flags shown are for the **legacy** `databricks-cli` PyPI package —
+   `pip install databricks-cli` installs this one, hence the deprecation
+   warning it prints; that's expected and harmless for this exercise. The
+   newer standalone CLI uses positional args instead, e.g.
+   `databricks secrets create-scope olist-secrets` with no `--scope` — if
+   `--scope` errors as unrecognized, you have the new CLI and should drop
+   the flag names back to positional.) This is the direct swap for the old
+   `#secrets/createScope` UI flow — same
+   `dbutils.secrets.get("olist-secrets", ...)` calls in the notebook, just
+   backed by Databricks' own store instead of Key Vault, so no Azure role
+   assignment is needed at all.
 5. Import BOTH notebooks into the same folder (Workspace → `/Shared` →
    Import): `databricks/olist_transforms.ipynb` and
    `databricks/transform_olist.ipynb` (the shell `%run`s
