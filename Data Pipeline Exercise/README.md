@@ -22,6 +22,14 @@ before the first cloud run.
 
 ## Architecture
 
+Visual diagram: [architecture.drawio](architecture.drawio) — open at
+[diagrams.net](https://app.diagrams.net) (File → Open) or with the draw.io
+VS Code extension. Reflects the actual as-built architecture, including
+both real deviations from the original design (Postgres via a
+Self-Hosted Integration Runtime instead of Azure Database for PostgreSQL;
+secrets as plain secure strings / a native Databricks scope instead of
+Key Vault — see Assumptions & trade-offs for why).
+
 ```
 PostgreSQL 16 (Docker, on-prem-style)        ADLS Gen2 inbox container
 src.orders · src.customers · src.order_items   products · sellers · geolocation

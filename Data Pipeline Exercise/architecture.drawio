@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="app.diagrams.net" agent="claude-code" version="24.0.0">
+  <diagram id="olist-pipeline-architecture" name="Architecture">
+    <mxGraphModel dx="1200" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1169" pageHeight="1654" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="Data Pipeline Exercise &#8212; Olist E-Commerce&#10;ADF + Self-Hosted IR + Azure Databricks + Azure SQL Database (as actually built)" style="text;align=center;verticalAlign=middle;fontSize=20;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="0" width="1000" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="src_pg" value="PostgreSQL 16 (Docker)&#10;qvc_sql_exercise container &#183; db: olist&#10;&#10;&#8226; src.orders&#10;&#8226; src.customers&#10;&#8226; src.order_items&#10;&#8226; src.order_payments&#10;&#8226; src.order_reviews&#10;&#10;Runs on laptop &#8212; reached via Self-Hosted IR" style="rounded=1;whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;verticalAlign=top;spacingTop=8;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="40" y="70" width="480" height="190" as="geometry" />
+        </mxCell>
+
+        <mxCell id="src_csv" value="ADLS inbox/ &#8212; 4 CSV files&#10;&#10;&#8226; products&#10;&#8226; sellers&#10;&#8226; geolocation (~61 MB)&#10;&#8226; product_category_translation" style="rounded=1;whiteSpace=wrap;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;verticalAlign=top;spacingTop=8;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="560" y="70" width="480" height="190" as="geometry" />
+        </mxCell>
+
+        <mxCell id="adf" value="Azure Data Factory &#8212; pl_olist_ingest&#10;metadata-driven: config/entities.json&#10;&#10;Lookup &#8594; Filter (postgres / csv) &#8594; ForEach &#215;2,&#10;each with 1 parameterised Copy activity&#10;&#8226; fe_pg: 5 iterations, via Self-Hosted IR&#10;&#8226; fe_csv: 4 iterations&#10;&#10;Secrets: typed directly as secure strings&#10;(storage account key, personal access token) &#8212;&#10;no Key Vault, no role assignments anywhere&#10;(subscription blocks all Azure RBAC)" style="rounded=1;whiteSpace=wrap;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;verticalAlign=top;spacingTop=8;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="40" y="330" width="1000" height="230" as="geometry" />
+        </mxCell>
+
+        <mxCell id="raw" value="ADLS olistdata/raw/ &#8212; landing zone&#10;&#10;&#8226; raw/parquet/ &#8212; flat files, named entity+RunId&#10;   (5 files, Postgres-sourced, no entity folder)&#10;&#8226; raw/csv/entity/ &#8212; one folder per entity&#10;   (4 folders, file-sourced)" style="rounded=1;whiteSpace=wrap;fillColor=#f5f5f5;strokeColor=#666666;fontSize=12;verticalAlign=top;spacingTop=8;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="40" y="630" width="1000" height="150" as="geometry" />
+        </mxCell>
+
+        <mxCell id="dbx" value="Azure Databricks (PySpark)&#10;transform_olist notebook + olist_transforms module&#10;&#10;&#8226; rename &#183; cast &#183; dedup &#183; DQ flags &#183; ingestion metadata&#10;&#8226; geolocation: 1,000,163 points &#8594; 19,015 zip-grain dim&#10;&#8226; per-entity failure isolation + process logging&#10;&#10;Secrets: native scope olist-secrets&#10;(CLI + personal access token &#8212; not Key Vault)" style="rounded=1;whiteSpace=wrap;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;verticalAlign=top;spacingTop=8;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="40" y="850" width="1000" height="230" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sql" value="Azure SQL Database (serverless)" style="rounded=1;whiteSpace=wrap;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14;fontStyle=1;verticalAlign=top;spacingTop=10;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="40" y="1150" width="1000" height="260" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sql_curated" value="curated&#10;9 typed tables&#10;&#10;orders &#183; customers &#183; order_items&#10;order_payments &#183; order_reviews&#10;products &#183; sellers &#183; geolocation&#10;product_category_translation" style="rounded=1;whiteSpace=wrap;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;verticalAlign=top;spacingTop=8;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="70" y="1200" width="300" height="190" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sql_etl" value="etl&#10;&#10;pipeline_process_log&#10;&#10;per-entity rows_read / rows_written /&#10;rows_flagged / status &#8212; for reconciliation" style="rounded=1;whiteSpace=wrap;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;verticalAlign=top;spacingTop=8;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="390" y="1200" width="300" height="190" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sql_mart" value="mart&#10;3 consumption views&#10;&#10;&#8226; v_sales_overview&#10;&#8226; v_payment_mix&#10;&#8226; v_review_delivery" style="rounded=1;whiteSpace=wrap;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;verticalAlign=top;spacingTop=8;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="710" y="1200" width="300" height="190" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e1" value="via Self-Hosted IR" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.3;entryY=0;entryDx=0;entryDy=0;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="src_pg" target="adf">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e2" value="Copy" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.7;entryY=0;entryDx=0;entryDy=0;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="src_csv" target="adf">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e3" value="9 parameterised Copy activities" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="adf" target="raw">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e4" value="read_raw()" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="raw" target="dbx">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e5" value="JDBC, truncate-load" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeWidth=2;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=11;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="dbx" target="sql">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
