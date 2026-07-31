@@ -238,7 +238,7 @@ checkpoints. Short version:
 
 ## Evidence of execution
 
-See `evidence/EvidenceDocument.docx` — embedded screenshots and query
+See `evidence/EvidenceDocument.pdf` — embedded screenshots and query
 output from the actual cloud run (2026-07-30): Postgres source tables,
 ADF pipeline execution to the raw staging layer, end-to-end pipeline
 success, Databricks notebook run log, curated-layer row counts,
