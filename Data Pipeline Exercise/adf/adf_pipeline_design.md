@@ -22,9 +22,8 @@ of JSON + one Spark config entry — zero pipeline edits.
 > PostgreSQL could not be provisioned in this subscription).
 >
 > **Verified fallback** (if the SHIR path is blocked): typed parquet
-> extracts of the same five tables, built by
-> `local_test/build_dbextract_parquet.py`, uploaded to a `dbextract`
-> container. The only change is `Copy_onprem_to_adls_raw`'s source
+> extracts of the same five tables, built locally and uploaded to a
+> `dbextract` container. The only change is `Copy_onprem_to_adls_raw`'s source
 > dataset: `ds_pg_table` → `ds_adls_parquet_dbextract` with
 > `entity = @item().entity` — sink, raw layout and notebook are identical.
 >
@@ -182,7 +181,7 @@ Earlier notes (based on the storage browser alone) described the csv
 side as not run-scoped, risking double-counted rows on a second run. The
 real pipeline JSON shows this isn't actually true: the csv sink's `file`
 parameter is `@pipeline().RunId` — deterministic, just like the parquet
-side's filename. `read_raw()` in `transform_olist.py` now reads the exact
+side's filename. The notebook's `read_raw()` now reads the exact
 file `raw/csv/<entity>/<RunId>.txt` (glob-matched by RunId prefix, same
 robustness pattern as the parquet branch) instead of the whole entity
 folder, so a second run reading a different RunId's file can no longer

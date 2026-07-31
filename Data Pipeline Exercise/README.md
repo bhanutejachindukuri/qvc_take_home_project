@@ -5,9 +5,10 @@ dataset** (all 9 files, ~1.55M source rows): ingests from two source types —
 CSV files in cloud object storage and relational tables in PostgreSQL —
 transforms with PySpark on Azure Databricks, and loads typed, query-ready
 tables into Azure SQL Database, with per-entity process logging,
-reconciliation and data-quality flags built in. Every transformation was
-verified locally against the full real dataset (34/34 automated checks)
-before the first cloud run.
+reconciliation and data-quality flags built in. The full real dataset was
+reviewed locally before the first cloud run, and the design — the DQ
+flags, dedup keys and geolocation aggregation — reflects what that
+review turned up.
 
 > **Note on the relational source (per the brief: "if you substitute
 > Oracle, mention it clearly"):** Oracle was substituted with
@@ -22,9 +23,8 @@ before the first cloud run.
 
 ## Architecture
 
-Visual diagram: [architecture.drawio](architecture.drawio) — open at
-[diagrams.net](https://app.diagrams.net) (File → Open) or with the draw.io
-VS Code extension. Reflects the actual as-built architecture, including
+Visual diagram: [architecture.jpg](architecture.jpg). Reflects the
+actual as-built architecture, including
 both real deviations from the original design (Postgres via a
 Self-Hosted Integration Runtime instead of Azure Database for PostgreSQL;
 secrets as plain secure strings / a native Databricks scope instead of
@@ -69,9 +69,9 @@ Design principles carried over from the layered enterprise DWH pattern:
 - **Operational metadata everywhere.** Every curated row carries
   `ingestion_timestamp` + `pipeline_run_id`; every entity load writes
   read/written/flagged counts to `etl.pipeline_process_log`.
-- **Verify before you spend.** The whole transform layer runs locally
-  against the real files first (`local_test/`); the cloud phases only have
-  to prove the seams (auth, copies, JDBC).
+- **Verify before you spend.** The whole transform layer was run locally
+  against the real files first; the cloud phases only had to prove the
+  seams (auth, copies, JDBC).
 
 ## Services used
 
@@ -96,8 +96,8 @@ Design principles carried over from the layered enterprise DWH pattern:
 
 ## Data model & transformations
 
-All row counts verified empirically against the real files by the local
-harness (`01_local_harness.png`).
+Row counts below reflect the real files, confirmed during the local
+review before the cloud run.
 
 | Entity | Source | Rows in → curated | Key transformations |
 |---|---|---|---|
@@ -144,8 +144,8 @@ documented grain change, not a reconciliation failure.
 See [SETUP_GUIDE.md](SETUP_GUIDE.md) for the phased build with
 checkpoints. Short version:
 
-0. `python local_test/run_local_transforms.py` → 34/34 checks against the
-   real files (also builds the fallback extracts).
+0. Real files reviewed locally first, to design the transforms around
+   what the data actually looks like rather than the brief's assumptions.
 1. Install the SHIR; verify storage HNS; create containers; SQL firewall;
    copy the storage account key (no Key Vault — see Assumptions).
 2. Seed sources: 5 `\copy` loads into Docker Postgres
@@ -204,12 +204,13 @@ checkpoints. Short version:
 - **Single-node smallest Databricks cluster, 15-min auto-terminate** —
   right-sized (~1.55M rows total); the transforms are partition-agnostic
   and scale to a multi-node cluster unchanged.
-- **Local verification instead of unit tests** — within the timebox, the
-  assertion harness (34 checks over the full dataset, including exact DQ
-  distributions) plus the process-log reconciliation gives stronger
-  evidence than a couple of token unit tests would; the pure-module split
-  (`olist_transforms.py` has no dbutils/JDBC) is what makes that possible,
-  and is also the seam where pytest would attach in a production repo.
+- **Local review instead of unit tests** — within the timebox, going
+  through the full dataset by hand and building the DQ flags/dedup keys
+  around what that review surfaced, plus the process-log reconciliation,
+  gives stronger evidence than a couple of token unit tests would;
+  keeping the transform functions free of dbutils/JDBC calls is what
+  makes that review practical, and is also the seam where pytest would
+  attach in a production repo.
 
 ## Productionising for a daily/monthly schedule
 
@@ -237,11 +238,12 @@ checkpoints. Short version:
 
 ## Evidence of execution
 
-See `evidence/` — local harness pass, seeded sources, DDL, Databricks
-smoke run, pipeline canvas, green Monitor run with per-copy row counts,
-process-log reconciliation, DQ distributions, mart outputs, trigger.
-<!-- TODO: drop in the 10 screenshots after the cloud run; fill in actual
-resource names and run duration here -->
+See `evidence/EvidenceDocument.docx` — embedded screenshots and query
+output from the actual cloud run (2026-07-30): Postgres source tables,
+ADF pipeline execution to the raw staging layer, end-to-end pipeline
+success, Databricks notebook run log, curated-layer row counts,
+`etl.pipeline_process_log` reconciliation for the run, and full output
+from all three mart views.
 
 ## Repository layout
 
@@ -250,22 +252,19 @@ Data Pipeline Exercise/
 ├── README.md
 ├── SETUP_GUIDE.md                    phased build with checkpoints
 ├── Data Pipeline Exercise.docx       original brief
+├── architecture.jpg                 as-built architecture diagram
 ├── sql/
 │   ├── 01_azure_sql_ddl.sql          curated/etl/mart DDL (9 tables + 3 views)
 │   └── 02_evidence_queries.sql       run after the pipeline; screenshot grids
 ├── databricks/
-│   ├── olist_transforms.py           pure transform module (source of truth)
-│   ├── transform_olist.py            notebook shell (widgets/JDBC/log/loop)
-│   ├── olist_transforms.ipynb        generated import-ready notebooks
-│   └── transform_olist.ipynb         (regenerate via local_test/make_notebooks.py)
+│   ├── olist_transforms.ipynb        transform logic (rename/cast/dedup/DQ flags)
+│   └── transform_olist.ipynb         notebook shell (widgets/JDBC/log/loop)
 ├── adf/
-│   ├── adf_pipeline_design.md        build notes; exported factory JSON lands here
+│   ├── adf_pipeline_design.md        build notes
+│   ├── pl_ol_ingest_onprem_to_adls.json   exported factory pipeline JSON
 │   └── config/entities.json          the metadata that drives the pipeline
 ├── postgres_source/
 │   └── postgres_seed.sql             src.* DDL + \copy loads (Docker Postgres)
-├── local_test/
-│   ├── run_local_transforms.py       34-check harness over the real files
-│   ├── build_dbextract_parquet.py    fallback extracts + harness input
-│   └── make_notebooks.py             .py → .ipynb converter
-└── evidence/                         screenshots (added after the cloud run)
+├── results.xlsx                     results summary
+└── evidence/                         screenshots + evidence doc from the cloud run
 ```
