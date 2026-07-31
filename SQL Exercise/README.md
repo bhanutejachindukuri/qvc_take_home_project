@@ -48,6 +48,12 @@ Beyond the file mislabeling above, running the Question 3 queries against the co
 4. **Duplicate customer email**: `alice@example.com` is used by both `customer_id 1` (Alice Johnson) and `customer_id 8` (Hannah Scott).
 5. **Orphaned customer reference** (not explicitly asked for, but caught by the schema design): order `1009`'s `customer_id` is `99`, which does not exist in `customers`. Because Questions 1 and 4 use inner joins to `orders`/`customers`, this order is naturally excluded from product-revenue and customer-ranking results rather than causing an error — worth flagging explicitly rather than leaving as a silent gap.
 
+## Evidence of execution
+
+See `SQL_Exercise_Evidence.docx` — query text and live result grids for all
+5 questions, including all three Question 3 sub-findings (order-total
+mismatches, orphaned order_items, duplicate customer emails).
+
 ## Optional ideas for improving the pipeline / model
 
 - Add a nightly data-quality check job running the Question 3 queries (and the `order_fact.order_total_diff <> 0` check from Question 5) with alerting, so `order_total` drift is caught same-day instead of at analysis time.
